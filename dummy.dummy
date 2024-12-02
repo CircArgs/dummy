@@ -1,31 +1,22 @@
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
+apiVersion: batch/v1
+kind: CronJob
 metadata:
-  name: sample-workflow
-  namespace: baworkflowsandbox
+  name: delete-{{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
 spec:
-  hosts:
-    - sample-workflow.dev.73684881378.aws.cb4good.com  # Your specific domain
-  gateways:
-    - mesh  # Internal traffic (within the cluster)
-  http:
-    - match:
-        - uri:
-            prefix: /dev-c1
-      rewrite:
-        uri: /  # Rewrites /dev-c1 to /
-      route:
-        - destination:
-            host: sample-workflow.baworkflowsandbox.svc.cluster.local
-            port:
-              number: 8082
-    - match:
-        - uri:
-            prefix: /dev-c2
-      rewrite:
-        uri: /  # Rewrites /dev-c2 to /
-      route:
-        - destination:
-            host: sample-workflow.baworkflowsandbox.svc.cluster.local
-            port:
-              number: 8083
+  schedule: "{{ .Values.cronSchedule | default "0 0 7 * *" }}" # Runs at midnight 7 days later
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: {{ .Values.serviceAccountName }} # Use the same ServiceAccount
+          containers:
+          - name: kubectl-delete
+            image: bitnami/kubectl:latest
+            command:
+            - /bin/sh
+            - -c
+            - |
+              sleep 604800 # 7 days in seconds
+              kubectl delete deployment {{ .Release.Name }} -n {{ .Release.Namespace }}
+          restartPolicy: Never
