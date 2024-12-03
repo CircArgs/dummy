@@ -1,22 +1,69 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: delete-{{ .Release.Name }}
-  namespace: {{ .Release.Namespace }}
+  name: delete-deployment-cronjob
+  namespace: default
 spec:
-  schedule: "{{ .Values.cronSchedule | default "0 0 7 * *" }}" # Runs at midnight 7 days later
+  schedule: "0 0 */10 * *" # Every 10 days at midnight
   jobTemplate:
     spec:
       template:
         spec:
-          serviceAccountName: {{ .Values.serviceAccountName }} # Use the same ServiceAccount
           containers:
-          - name: kubectl-delete
-            image: bitnami/kubectl:latest
-            command:
-            - /bin/sh
-            - -c
-            - |
-              sleep 604800 # 7 days in seconds
-              kubectl delete deployment {{ .Release.Name }} -n {{ .Release.Namespace }}
-          restartPolicy: Never
+          - name: alpine-cronjob
+            image: <your-registry>/alpine-cronjob:latest
+            imagePullPolicy: Always
+            resources:
+              requests:
+                cpu: "10m"
+                memory: "32Mi"
+              limits:
+                cpu: "50m"
+                memory: "64Mi"
+          restartPolicy: OnFailure
+
+---
+# Use Alpine as the base image
+FROM alpine:latest
+
+# Set working directory
+WORKDIR /app
+
+# Install necessary tools
+RUN apk add --no-cache bash curl
+
+# Copy the custom script
+COPY cronjob-script.sh /app/cronjob-script.sh
+
+# Make the script executable
+RUN chmod +x /app/cronjob-script.sh
+
+# Set the default command to execute the script (called by the CronJob)
+CMD ["/app/cronjob-script.sh"]
+
+
+---
+
+#!/bin/bash
+
+# Kubernetes namespace and deployment
+NAMESPACE="default"
+DEPLOYMENT="my-deployment"
+
+# Authenticate with Kubernetes API (using ServiceAccount token)
+TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+API_SERVER="https://kubernetes.default.svc"
+CA_CERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+# Delete the Kubernetes deployment
+curl -X DELETE \
+  -H "Authorization: Bearer $TOKEN" \
+  --cacert $CA_CERT \
+  $API_SERVER/apis/apps/v1/namespaces/$NAMESPACE/deployments/$DEPLOYMENT
+
+# Log success or failure
+if [ $? -eq 0 ]; then
+  echo "$(date): Successfully deleted deployment $DEPLOYMENT in namespace $NAMESPACE"
+else
+  echo "$(date): Failed to delete deployment $DEPLOYMENT"
+fi
