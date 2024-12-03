@@ -1,69 +1,27 @@
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: delete-deployment-cronjob
-  namespace: default
-spec:
-  schedule: "0 0 */10 * *" # Every 10 days at midnight
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          containers:
-          - name: alpine-cronjob
-            image: <your-registry>/alpine-cronjob:latest
-            imagePullPolicy: Always
-            resources:
-              requests:
-                cpu: "10m"
-                memory: "32Mi"
-              limits:
-                cpu: "50m"
-                memory: "64Mi"
-          restartPolicy: OnFailure
+from dotenv import load_dotenv
+import yaml
+from pydantic import BaseSettings
 
----
-# Use Alpine as the base image
-FROM alpine:latest
+# Load .env variables into the environment
+load_dotenv()
 
-# Set working directory
-WORKDIR /app
+class AppConfig(BaseSettings):
+    db_host: str
+    db_port: int
+    db_user: str
+    db_pass: str
 
-# Install necessary tools
-RUN apk add --no-cache bash curl
+    class Config:
+        env_prefix = 'DB_'  # Environment variable prefix
 
-# Copy the custom script
-COPY cronjob-script.sh /app/cronjob-script.sh
+# Load YAML configuration
+def load_config(yaml_path: str):
+    try:
+        with open(yaml_path, 'r') as file:
+            yaml_data = yaml.safe_load(file)
+    except FileNotFoundError:
+        yaml_data = {}
+    return AppConfig(**yaml_data)
 
-# Make the script executable
-RUN chmod +x /app/cronjob-script.sh
-
-# Set the default command to execute the script (called by the CronJob)
-CMD ["/app/cronjob-script.sh"]
-
-
----
-
-#!/bin/bash
-
-# Kubernetes namespace and deployment
-NAMESPACE="default"
-DEPLOYMENT="my-deployment"
-
-# Authenticate with Kubernetes API (using ServiceAccount token)
-TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
-API_SERVER="https://kubernetes.default.svc"
-CA_CERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-
-# Delete the Kubernetes deployment
-curl -X DELETE \
-  -H "Authorization: Bearer $TOKEN" \
-  --cacert $CA_CERT \
-  $API_SERVER/apis/apps/v1/namespaces/$NAMESPACE/deployments/$DEPLOYMENT
-
-# Log success or failure
-if [ $? -eq 0 ]; then
-  echo "$(date): Successfully deleted deployment $DEPLOYMENT in namespace $NAMESPACE"
-else
-  echo "$(date): Failed to delete deployment $DEPLOYMENT"
-fi
+config = load_config('config.yaml')
+print(config.dict())  # Merged config from YAML and .env
