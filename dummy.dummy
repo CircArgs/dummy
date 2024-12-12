@@ -1,1 +1,68 @@
+import socket
+import paramiko
+import threading
 
+# Load host key
+HOST_KEY = paramiko.RSAKey.generate(2048)  # Generates a temporary RSA key for the server
+
+# Define a simple handler for SSH sessions
+class NoAuthServer(paramiko.ServerInterface):
+    def check_auth_none(self, username):
+        return paramiko.AUTH_SUCCESSFUL  # Allow all connections without authentication
+    
+    def get_allowed_auths(self, username):
+        return "none"  # Advertise "none" as the allowed authentication method
+    
+    def check_channel_request(self, kind, chanid):
+        if kind == 'session':
+            return paramiko.OPEN_SUCCEEDED  # Allow session requests
+        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+    
+    def check_channel_shell_request(self, channel):
+        return True  # Allow shell requests
+
+# Start the server
+def start_server(host="0.0.0.0", port=2200):
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((host, port))
+    server_socket.listen(100)
+    
+    print(f"Listening for connections on {host}:{port}...")
+    while True:
+        client, addr = server_socket.accept()
+        print(f"Connection from {addr}")
+        
+        # Create a Paramiko transport
+        transport = paramiko.Transport(client)
+        transport.add_server_key(HOST_KEY)
+        
+        # Start the server
+        server = NoAuthServer()
+        transport.start_server(server=server)
+        
+        # Accept a session channel
+        channel = transport.accept(20)
+        if channel is None:
+            print("No channel opened!")
+            continue
+        
+        print("Session channel opened")
+        
+        # Example: Send a welcome message
+        channel.send(b"Welcome to the no-auth SSH server!\n")
+        try:
+            while True:
+                data = channel.recv(1024)
+                if not data:
+                    break
+                print(f"Received: {data.decode()}")
+                channel.send(b"Echo: " + data)
+        except Exception as e:
+            print(f"Exception: {e}")
+        finally:
+            channel.close()
+
+# Run the server
+if __name__ == "__main__":
+    start_server()
