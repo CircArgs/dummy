@@ -1,147 +1,75 @@
-import os
 import socket
 import threading
 import paramiko
-from paramiko import SFTPServerInterface, SFTPAttributes, SFTPHandle
+import logging
 
-# --- Configuration ---
-HOST = "0.0.0.0"           # Listen on all interfaces
-PORT = 2024                # Port for SFTP server
-USERNAME = "testuser"      # SFTP Username
-PASSWORD = "testpass"      # SFTP Password
-ROOT_DIR = "./sftp_root"   # Directory for SFTP file operations
+logging.basicConfig(level=logging.INFO)
 
-# Ensure the root directory exists
-os.makedirs(ROOT_DIR, exist_ok=True)
+# Generate a host key in memory for demonstration
+# For production, you should generate and store a persistent host key
+host_key = paramiko.RSAKey.generate(2048)
 
-# --- Custom Authentication ---
-class SimpleAuth(paramiko.ServerInterface):
-    """ Custom authentication handler for the SFTP server """
-    def __init__(self, username, password):
-        self.username = username
-        self.password = password
+class SFTPServerInterface(paramiko.SFTPServerInterface):
+    # This class can be expanded to interact with real filesystem or a virtual one.
+    def __init__(self, server, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.home_dir = '/tmp'  # Example home directory
+
+    def list_folder(self, path):
+        # List files in the specified folder.
+        # Here we return an empty list as an example.
+        return []
+
+    def stat(self, path):
+        # Implement proper stat if you want real file interaction.
+        # Raise an IOError if the file does not exist.
+        raise IOError("File not found")
+
+    # Implement other SFTPServerInterface methods as needed for functionality.
+
+class Server(paramiko.ServerInterface):
+    def __init__(self):
+        self.event = threading.Event()
 
     def check_auth_password(self, username, password):
-        if username == self.username and password == self.password:
+        # Simple authentication for demonstration:
+        # username: testuser, password: password
+        if username == "testuser" and password == "password":
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
-    def get_allowed_auths(self, username):
-        return "password"
-
     def check_channel_request(self, kind, chanid):
-        if kind == "session":
+        if kind == 'session':
             return paramiko.OPEN_SUCCEEDED
         return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
-    def check_channel_subsystem_request(self, channel, name):
-        if name == "sftp":
-            return True
-        return False
 
-# --- SFTP Server Interface ---
-class SimpleSFTPServerInterface(SFTPServerInterface):
-    """ Custom SFTP server interface for file operations """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.root_dir = os.path.abspath(ROOT_DIR)
+if __name__ == '__main__':
+    port = 2222
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('0.0.0.0', port))
+    sock.listen(100)
+    logging.info(f"Listening on 0.0.0.0:{port}")
 
-    def _resolve_path(self, path):
-        """ Resolve paths safely within the root directory """
-        normalized_path = os.path.normpath(os.path.join(self.root_dir, path.lstrip('/')))
-        if not normalized_path.startswith(self.root_dir):
-            raise IOError("Access outside root directory is denied")
-        return normalized_path
+    while True:
+        client, addr = sock.accept()
+        logging.info(f"Connection from {addr}")
+        t = paramiko.Transport(client)
+        t.add_server_key(host_key)
+        server = Server()
 
-    def list_folder(self, path):
-        path = self._resolve_path(path)
-        files = os.listdir(path)
-        attrs = []
-        for f in files:
-            attr = SFTPAttributes()
-            stat = os.stat(os.path.join(path, f))
-            attr.filename = f
-            attr.st_size = stat.st_size
-            attr.st_mode = stat.st_mode
-            attr.st_mtime = stat.st_mtime
-            attrs.append(attr)
-        return attrs
-
-    def open(self, path, flags, attr):
-        path = self._resolve_path(path)
         try:
-            f = open(path, 'r+b') if os.path.exists(path) else open(path, 'wb+')
-        except IOError:
-            raise IOError("Unable to open file")
-        return SFTPHandle(f)
+            t.start_server(server=server)
+        except paramiko.SSHException:
+            logging.error("SSH negotiation failed.")
+            continue
 
-    def mkdir(self, path, attr):
-        os.makedirs(self._resolve_path(path), exist_ok=True)
+        chan = t.accept(20)
+        if chan is None:
+            logging.error("No channel.")
+            t.close()
+            continue
 
-    def remove(self, path):
-        os.remove(self._resolve_path(path))
-
-    def rename(self, oldpath, newpath):
-        os.rename(self._resolve_path(oldpath), self._resolve_path(newpath))
-
-    def rmdir(self, path):
-        os.rmdir(self._resolve_path(path))
-
-# --- SFTP Server ---
-class SimpleSFTPServer:
-    """ Paramiko-based SFTP Server """
-    def __init__(self, host, port, username, password):
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-
-    def start_server(self):
-        print(f"Starting SFTP server on {self.host}:{self.port}")
-        host_key = paramiko.RSAKey.generate(2048)
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.bind((self.host, self.port))
-        server_socket.listen(100)
-
-        while True:
-            client, addr = server_socket.accept()
-            print(f"Connection from {addr}")
-            threading.Thread(target=self.handle_client, args=(client, host_key)).start()
-
-    def handle_client(self, client, host_key):
-        transport = paramiko.Transport(client)
-        transport.add_server_key(host_key)
-
-        # Initialize authentication
-        auth_handler = SimpleAuth(self.username, self.password)
-        try:
-            transport.start_server(server=auth_handler)
-        except paramiko.SSHException as e:
-            print(f"SSH negotiation failed: {e}")
-            return
-
-        # Accept the SFTP subsystem
-        channel = transport.accept(20)
-        if channel is None:
-            print("Failed to accept channel request")
-            return
-
-        print("SFTP subsystem initialized")
-        try:
-            # Use SimpleSFTPServerInterface to handle SFTP requests
-            server = SimpleSFTPServerInterface(transport)
-            while True:
-                transport.join(0.1)  # Keep the server alive
-        except Exception as e:
-            print(f"Error during SFTP session: {e}")
-        finally:
-            channel.close()
-            transport.close()
-
-# --- Main Entry Point ---
-if __name__ == "__main__":
-    server = SimpleSFTPServer(HOST, PORT, USERNAME, PASSWORD)
-    try:
-        server.start_server()
-    except KeyboardInterrupt:
-        print("Shutting down the SFTP server...")
+        sftp_server = paramiko.SFTPServer(t, SFTPServerInterface)
+        sftp_server.serve_forever()
