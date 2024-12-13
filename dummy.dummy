@@ -6,7 +6,7 @@ from paramiko import SFTPServerInterface, SFTPAttributes, SFTPHandle
 
 # --- Configuration ---
 HOST = "0.0.0.0"           # Listen on all interfaces
-PORT = 2023                # Port for SFTP server
+PORT = 2024                # Port for SFTP server
 USERNAME = "testuser"      # SFTP Username
 PASSWORD = "testpass"      # SFTP Password
 ROOT_DIR = "./sftp_root"   # Directory for SFTP file operations
@@ -128,7 +128,9 @@ class SimpleSFTPServer:
 
         print("SFTP subsystem initialized")
         try:
-            SFTPServer(channel, SimpleSFTPServerInterface)
+            # Start the SFTP subsystem
+            sftp = paramiko.SFTPServer(channel, SimpleSFTPServerInterface)
+            sftp.serve_forever()
         except Exception as e:
             print(f"Error during SFTP session: {e}")
         finally:
