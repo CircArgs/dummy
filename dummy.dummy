@@ -6,8 +6,8 @@ import threading
 # SSH Server Host Keys (Generate keys using `ssh-keygen -t rsa` if needed)
 HOST_KEY = paramiko.RSAKey.generate(2048)  # For demonstration; save this key securely in production
 
-# Directory to serve for SFTP operations
-BASE_DIR = os.path.expanduser("~/sshfs_root")
+# Directory to serve for SFTP operations (restricted to /workspace)
+BASE_DIR = "/workspace"
 
 # Ensure the directory exists
 os.makedirs(BASE_DIR, exist_ok=True)
@@ -24,10 +24,14 @@ class SFTPServer(paramiko.SFTPServerInterface):
 
     def open(self, path, flags, attr):
         real_path = os.path.join(BASE_DIR, path.strip("/"))
+        if not real_path.startswith(BASE_DIR):
+            raise PermissionError("Access denied")
         return open(real_path, flags)
 
     def list_folder(self, path):
         real_path = os.path.join(BASE_DIR, path.strip("/"))
+        if not real_path.startswith(BASE_DIR):
+            raise PermissionError("Access denied")
         return [paramiko.SFTPAttributes.from_stat(os.stat(os.path.join(real_path, f))) for f in os.listdir(real_path)]
 
 # SSH Server Class
