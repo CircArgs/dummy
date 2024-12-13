@@ -1,245 +1,15 @@
-import socket
-import threading
-import paramiko
-import logging
 import os
-import stat as stat_module
+import socket
+import paramiko
+import threading
 
-from paramiko import SFTP_OK, SFTP_EOF, SFTP_NO_SUCH_FILE, SFTP_PERMISSION_DENIED, SFTP_FAILURE
-
-logging.basicConfig(level=logging.INFO)
-
-# Generate a host key in memory (in production, store this persistently)
-host_key = paramiko.RSAKey.generate(2048)
-
-# Configuration
-USERNAME = "testuser"
-PASSWORD = "password"
-ROOT_DIR = "/data"
+HOST = '0.0.0.0'
 PORT = 2222
+USERNAME = 'testuser'
+PASSWORD = 'testpass'
 
-# Ensure ROOT_DIR exists
-os.makedirs(ROOT_DIR, exist_ok=True)
-
-class SFTPServerInterface(paramiko.SFTPServerInterface):
-    def __init__(self, server, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.server = server
-        self.handle_counter = 1
-        self.open_files = {}  # handle_id -> file object
-
-    def _to_local_path(self, path):
-        # Normalize and ensure no path escapes ROOT_DIR
-        # Remove leading slash to avoid absolute paths
-        if path.startswith("/"):
-            path = path[1:]
-        local_path = os.path.normpath(os.path.join(ROOT_DIR, path))
-        if not local_path.startswith(ROOT_DIR):
-            # Path escape attempt
-            raise IOError("Permission denied")
-        return local_path
-
-    def _attr_from_stat(self, st):
-        # Convert a Python stat result to SFTPAttributes
-        attr = paramiko.SFTPAttributes()
-        attr.st_mode = st.st_mode
-        attr.st_size = st.st_size
-        attr.st_uid = st.st_uid
-        attr.st_gid = st.st_gid
-        attr.st_atime = st.st_atime
-        attr.st_mtime = st.st_mtime
-        return attr
-
-    def list_folder(self, path):
-        try:
-            local_path = self._to_local_path(path)
-            entries = os.listdir(local_path)
-            out = []
-            for entry in entries:
-                full_path = os.path.join(local_path, entry)
-                st = os.lstat(full_path)
-                attr = self._attr_from_stat(st)
-                attr.filename = entry
-                out.append(attr)
-            return out
-        except FileNotFoundError:
-            return SFTP_NO_SUCH_FILE
-        except PermissionError:
-            return SFTP_PERMISSION_DENIED
-        except Exception:
-            return SFTP_FAILURE
-
-    def stat(self, path):
-        try:
-            local_path = self._to_local_path(path)
-            st = os.stat(local_path)
-            return self._attr_from_stat(st)
-        except FileNotFoundError:
-            return SFTP_NO_SUCH_FILE
-        except PermissionError:
-            return SFTP_PERMISSION_DENIED
-        except Exception:
-            return SFTP_FAILURE
-
-    def lstat(self, path):
-        try:
-            local_path = self._to_local_path(path)
-            st = os.lstat(local_path)
-            return self._attr_from_stat(st)
-        except FileNotFoundError:
-            return SFTP_NO_SUCH_FILE
-        except PermissionError:
-            return SFTP_PERMISSION_DENIED
-        except Exception:
-            return SFTP_FAILURE
-
-    def open(self, path, flags, attr):
-        # flags are posix flags, e.g. os.O_RDONLY, os.O_WRONLY, etc.
-        # Map paramiko sftp flags to python open modes
-        local_path = self._to_local_path(path)
-        mode = None
-        # Determine mode from flags
-        if flags & os.O_WRONLY and flags & os.O_CREAT:
-            if flags & os.O_EXCL:
-                # Create exclusive
-                mode = 'xb'
-            elif flags & os.O_TRUNC:
-                mode = 'wb'
-            else:
-                mode = 'r+b' if os.path.exists(local_path) else 'wb'
-        elif flags & os.O_WRONLY:
-            mode = 'r+b' if os.path.exists(local_path) else 'wb'
-            if flags & os.O_TRUNC:
-                mode = 'wb'
-        elif flags & os.O_RDWR:
-            # read/write mode
-            mode = 'r+b' if os.path.exists(local_path) else 'wb+'
-        else:
-            # read only
-            mode = 'rb'
-
-        try:
-            f = open(local_path, mode)
-            handle_id = self.handle_counter
-            self.handle_counter += 1
-            self.open_files[handle_id] = f
-            return handle_id
-        except FileNotFoundError:
-            return SFTP_NO_SUCH_FILE
-        except PermissionError:
-            return SFTP_PERMISSION_DENIED
-        except Exception:
-            return SFTP_FAILURE
-
-    def read(self, handle, offset, length):
-        f = self.open_files.get(handle)
-        if f is None:
-            return SFTP_NO_SUCH_FILE
-        try:
-            f.seek(offset)
-            data = f.read(length)
-            return data
-        except Exception:
-            return SFTP_FAILURE
-
-    def write(self, handle, offset, data):
-        f = self.open_files.get(handle)
-        if f is None:
-            return SFTP_NO_SUCH_FILE
-        try:
-            f.seek(offset)
-            f.write(data)
-            f.flush()
-            return SFTP_OK
-        except PermissionError:
-            return SFTP_PERMISSION_DENIED
-        except Exception:
-            return SFTP_FAILURE
-
-    def close(self, handle):
-        f = self.open_files.pop(handle, None)
-        if f is None:
-            return SFTP_NO_SUCH_FILE
-        try:
-            f.close()
-            return SFTP_OK
-        except Exception:
-            return SFTP_FAILURE
-
-    def remove(self, path):
-        try:
-            local_path = self._to_local_path(path)
-            os.remove(local_path)
-            return SFTP_OK
-        except FileNotFoundError:
-            return SFTP_NO_SUCH_FILE
-        except PermissionError:
-            return SFTP_PERMISSION_DENIED
-        except Exception:
-            return SFTP_FAILURE
-
-    def rename(self, oldpath, newpath):
-        try:
-            old_local = self._to_local_path(oldpath)
-            new_local = self._to_local_path(newpath)
-            os.rename(old_local, new_local)
-            return SFTP_OK
-        except FileNotFoundError:
-            return SFTP_NO_SUCH_FILE
-        except PermissionError:
-            return SFTP_PERMISSION_DENIED
-        except Exception:
-            return SFTP_FAILURE
-
-    def mkdir(self, path, attr):
-        try:
-            local_path = self._to_local_path(path)
-            os.mkdir(local_path)
-            return SFTP_OK
-        except FileExistsError:
-            return SFTP_FAILURE  # already exists
-        except PermissionError:
-            return SFTP_PERMISSION_DENIED
-        except Exception:
-            return SFTP_FAILURE
-
-    def rmdir(self, path):
-        try:
-            local_path = self._to_local_path(path)
-            os.rmdir(local_path)
-            return SFTP_OK
-        except FileNotFoundError:
-            return SFTP_NO_SUCH_FILE
-        except PermissionError:
-            return SFTP_PERMISSION_DENIED
-        except OSError:  # not empty or other error
-            return SFTP_FAILURE
-
-    def realpath(self, path):
-        # Return canonical path
-        try:
-            local_path = self._to_local_path(path)
-            real = os.path.relpath(os.path.realpath(local_path), ROOT_DIR)
-            return "/" + real
-        except Exception:
-            return SFTP_FAILURE
-
-    def statvfs(self, path):
-        # Not strictly required for rclone, but let's implement it
-        try:
-            local_path = self._to_local_path(path)
-            stv = os.statvfs(local_path)
-            # return a tuple of:
-            # (f_bsize, f_frsize, f_blocks, f_bfree, f_bavail,
-            #  f_files, f_ffree, f_favail, f_flag, f_namemax)
-            return (stv.f_bsize, stv.f_frsize, stv.f_blocks, stv.f_bfree,
-                    stv.f_bavail, stv.f_files, stv.f_ffree, stv.f_favail,
-                    stv.f_flag, stv.f_namemax)
-        except Exception:
-            return SFTP_FAILURE
-
-
-class Server(paramiko.ServerInterface):
+# Define a handler for SFTP connections
+class SFTPServer(paramiko.ServerInterface):
     def __init__(self):
         self.event = threading.Event()
 
@@ -253,33 +23,31 @@ class Server(paramiko.ServerInterface):
             return paramiko.OPEN_SUCCEEDED
         return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
+    def get_allowed_auths(self, username):
+        return 'password'
 
-if __name__ == '__main__':
+def start_sftp_server():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(('0.0.0.0', PORT))
-    sock.listen(100)
-    logging.info(f"Listening on 0.0.0.0:{PORT}")
+    sock.bind((HOST, PORT))
+    sock.listen(5)
+    print(f"SFTP server listening on {HOST}:{PORT}")
 
     while True:
         client, addr = sock.accept()
-        logging.info(f"Connection from {addr}")
-        t = paramiko.Transport(client)
-        t.add_server_key(host_key)
-        server = Server()
-        try:
-            t.start_server(server=server)
-        except paramiko.SSHException:
-            logging.error("SSH negotiation failed.")
-            continue
+        print(f"Connection from {addr}")
+        transport = paramiko.Transport(client)
+        transport.load_server_moduli()
+        transport.add_server_key(paramiko.RSAKey.generate(2048))
+        server = SFTPServer()
+        transport.start_server(server=server)
 
-        chan = t.accept(20)
+        chan = transport.accept()
         if chan is None:
-            logging.error("No channel.")
-            t.close()
             continue
 
-        # Create SFTP server with an instance of the interface
-        sftp_interface = SFTPServerInterface(server)
-        sftp_server = paramiko.SFTPServer(t, sftp_interface)
-        sftp_server.serve_forever()
+        sftp = paramiko.SFTPServer(transport, chan)
+        sftp.set_subsystem_handler('sftp', paramiko.SFTPServerInterface)
+
+if __name__ == '__main__':
+    start_sftp_server()
