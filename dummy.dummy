@@ -3,36 +3,70 @@ import paramiko
 import socket
 import threading
 
-# SSH Server Host Keys (Generate keys using `ssh-keygen -t rsa` if needed)
-HOST_KEY = paramiko.RSAKey.generate(2048)  # For demonstration; save this key securely in production
+# SSH Server Host Keys
+HOST_KEY = paramiko.RSAKey.generate(2048)
 
 # Directory to serve for SFTP operations (restricted to /workspace)
 BASE_DIR = "/workspace"
-
-# Ensure the directory exists
 os.makedirs(BASE_DIR, exist_ok=True)
 
 # SSH Server Configuration
 HOST = "0.0.0.0"
-PORT = 2222  # Default port for testing (change if needed)
+PORT = 2222
 
-# Custom SFTP Server Handler
-class SFTPServer(paramiko.SFTPServerInterface):
+# Custom SFTP Server Interface
+class SimpleSFTPServer(paramiko.SFTPServerInterface):
     def __init__(self, server, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.server = server
 
-    def open(self, path, flags, attr):
-        real_path = os.path.join(BASE_DIR, path.strip("/"))
-        if not real_path.startswith(BASE_DIR):
-            raise PermissionError("Access denied")
-        return open(real_path, flags)
+    def _realpath(self, path):
+        """Convert relative paths to absolute paths within BASE_DIR."""
+        return os.path.abspath(os.path.join(BASE_DIR, os.path.normpath(path.lstrip("/"))))
 
     def list_folder(self, path):
-        real_path = os.path.join(BASE_DIR, path.strip("/"))
-        if not real_path.startswith(BASE_DIR):
-            raise PermissionError("Access denied")
-        return [paramiko.SFTPAttributes.from_stat(os.stat(os.path.join(real_path, f))) for f in os.listdir(real_path)]
+        real_path = self._realpath(path)
+        if not os.path.exists(real_path):
+            raise IOError("No such directory")
+        files = []
+        for item in os.listdir(real_path):
+            item_path = os.path.join(real_path, item)
+            attr = paramiko.SFTPAttributes.from_stat(os.stat(item_path))
+            attr.filename = item
+            files.append(attr)
+        return files
+
+    def open(self, path, flags, attr):
+        real_path = self._realpath(path)
+        try:
+            mode = "r+b" if os.path.exists(real_path) else "w+b"
+            if flags & os.O_WRONLY:
+                mode = "wb"
+            elif flags & os.O_RDONLY:
+                mode = "rb"
+            return open(real_path, mode)
+        except Exception as e:
+            raise IOError(f"Failed to open file: {e}")
+
+    def remove(self, path):
+        real_path = self._realpath(path)
+        if os.path.isfile(real_path):
+            os.remove(real_path)
+        else:
+            raise IOError("Not a valid file")
+
+    def rename(self, oldpath, newpath):
+        old_real = self._realpath(oldpath)
+        new_real = self._realpath(newpath)
+        os.rename(old_real, new_real)
+
+    def mkdir(self, path, attr):
+        real_path = self._realpath(path)
+        os.makedirs(real_path, exist_ok=True)
+
+    def rmdir(self, path):
+        real_path = self._realpath(path)
+        os.rmdir(real_path)
 
 # SSH Server Class
 class SSHServer(paramiko.ServerInterface):
@@ -52,7 +86,8 @@ class SSHServer(paramiko.ServerInterface):
 
     def check_channel_subsystem_request(self, channel, name):
         if name == "sftp":
-            self.sftp_server = paramiko.SFTPServer(channel, SFTPServer, BASE_DIR)
+            transport = paramiko.SFTPServer(channel, SimpleSFTPServer)
+            threading.Thread(target=transport.serve_forever).start()
             return True
         return False
 
@@ -72,15 +107,11 @@ def start_server():
             transport.add_server_key(HOST_KEY)
             ssh_server = SSHServer()
             transport.start_server(server=ssh_server)
-
             channel = transport.accept(20)
+
             if channel is None:
                 continue
-            print("SSH Connection Established")
-
-            ssh_server.event.wait(10)
-            if not ssh_server.event.is_set():
-                raise Exception("Channel timeout")
+            print("SFTP Connection Established")
         except Exception as e:
             print(f"Error: {e}")
         finally:
