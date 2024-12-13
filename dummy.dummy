@@ -42,8 +42,8 @@ class SimpleAuth(paramiko.ServerInterface):
 # --- SFTP Server Interface ---
 class SimpleSFTPServerInterface(SFTPServerInterface):
     """ Custom SFTP server interface for file operations """
-    def __init__(self, server, *args, **kwargs):
-        super().__init__(server, *args, **kwargs)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.root_dir = os.path.abspath(ROOT_DIR)
 
     def _resolve_path(self, path):
@@ -120,7 +120,7 @@ class SimpleSFTPServer:
             print(f"SSH negotiation failed: {e}")
             return
 
-        # Accept the SFTP session
+        # Accept the SFTP subsystem
         channel = transport.accept(20)
         if channel is None:
             print("Failed to accept channel request")
@@ -128,9 +128,10 @@ class SimpleSFTPServer:
 
         print("SFTP subsystem initialized")
         try:
-            # Start the SFTP subsystem
-            sftp = paramiko.SFTPServer(channel, SimpleSFTPServerInterface)
-            sftp.serve_forever()
+            # Use SimpleSFTPServerInterface to handle SFTP requests
+            server = SimpleSFTPServerInterface(transport)
+            while True:
+                transport.join(0.1)  # Keep the server alive
         except Exception as e:
             print(f"Error during SFTP session: {e}")
         finally:
