@@ -94,31 +94,32 @@ class SimpleSFTPServer:
     def handle_client(self, client, host_key):
         transport = paramiko.Transport(client)
         transport.add_server_key(host_key)
-        sftp_server = paramiko.ServerInterface()
+    
+        # Custom authentication setup
+        server = SimpleAuth(self.username, self.password)
+        try:
+            transport.start_server(server=server)
+        except paramiko.SSHException as e:
+            print(f"SSH negotiation failed: {e}")
+            return
+    
+        # Accept the channel request
+        channel = transport.accept(20)
+        if channel is None:
+            print("Failed to accept channel request")
+            raise Exception("No channel")
+    
+        # Subsystem initialization for SFTP
+        try:
+            print("Starting SFTP subsystem...")
+            sftp_server = paramiko.SFTPServer(channel, SimpleSFTPServerInterface)
+            sftp_server.serve_forever()
+        except Exception as e:
+            print(f"Error during SFTP session: {e}")
+        finally:
+            channel.close()
+            transport.close()
 
-        # Custom authentication
-        class SimpleAuth(paramiko.ServerInterface):
-            def __init__(self, username, password):
-                self.username = username
-                self.password = password
-        
-            def check_auth_password(self, username, password):
-                if username == self.username and password == self.password:
-                    return paramiko.AUTH_SUCCESSFUL
-                return paramiko.AUTH_FAILED
-        
-            def get_allowed_auths(self, username):
-                return "password"
-        
-            def check_channel_request(self, kind, chanid):
-                if kind == "session":
-                    return paramiko.OPEN_SUCCEEDED
-                return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
-        
-            def check_channel_subsystem_request(self, channel, name):
-                if name == "sftp":
-                    return True
-                return False
 
 
         server = SimpleAuth()
