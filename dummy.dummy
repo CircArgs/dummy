@@ -1,53 +1,381 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# Copyright (C) 2003-2009  Robey Pointer <robeypointer@gmail.com>
+#
+# This file is part of paramiko.
+#
+# Paramiko is free software; you can redistribute it and/or modify it under the
+# terms of the GNU Lesser General Public License as published by the
+# Free Software Foundation; either version 2.1 of the License, or (at your option)
+# any later version.
+#
+# Paramiko is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+# A PARTICULAR PURPOSE.  See the GNU Lesser General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with Paramiko; if not, write to the Free Software Foundation, Inc.,
+# 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA.
+
 import os
-import socket
 import paramiko
-import threading
+from paramiko import ServerInterface, SFTPServerInterface, SFTPServer, SFTPAttributes, \
+    SFTPHandle, SFTP_OK, AUTH_SUCCESSFUL, OPEN_SUCCEEDED
 
-HOST = '0.0.0.0'
-PORT = 2222
-USERNAME = 'testuser'
-PASSWORD = 'testpass'
-
-# Define a handler for SFTP connections
-class SFTPServer(paramiko.ServerInterface):
-    def __init__(self):
-        self.event = threading.Event()
-
+class StubServer(ServerInterface):
     def check_auth_password(self, username, password):
-        if username == USERNAME and password == PASSWORD:
-            return paramiko.AUTH_SUCCESSFUL
-        return paramiko.AUTH_FAILED
+        # all are allowed
+        return AUTH_SUCCESSFUL
+
+    def check_auth_publickey(self, username, key):
+        # all are allowed
+        return AUTH_SUCCESSFUL
 
     def check_channel_request(self, kind, chanid):
+        # allow session channels
         if kind == 'session':
-            return paramiko.OPEN_SUCCEEDED
-        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+            return OPEN_SUCCEEDED
+        return OPEN_SUCCEEDED
 
     def get_allowed_auths(self, username):
-        return 'password'
+        """List available auth mechanisms."""
+        return "password,publickey"
 
-def start_sftp_server():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((HOST, PORT))
-    sock.listen(5)
-    print(f"SFTP server listening on {HOST}:{PORT}")
+    def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
+        # Allow PTY requests
+        return True
 
+    def check_channel_shell_request(self, channel):
+        # Allow shell requests
+        return True
+
+
+class StubSFTPHandle(SFTPHandle):
+    def stat(self):
+        try:
+            return SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+
+    def chattr(self, attr):
+        try:
+            SFTPServer.set_file_attr(self.filename, attr)
+            return SFTP_OK
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+
+
+class StubSFTPServer(SFTPServerInterface):
+    ROOT = os.getcwd()
+    KEY = None
+
+    def _realpath(self, path):
+        return self.ROOT + self.canonicalize(path)
+
+    def list_folder(self, path):
+        path = self._realpath(path)
+        try:
+            out = []
+            flist = os.listdir(path)
+            for fname in flist:
+                attr = SFTPAttributes.from_stat(os.lstat(os.path.join(path, fname)))
+                attr.filename = fname
+                out.append(attr)
+            return out
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+
+    def stat(self, path):
+        path = self._realpath(path)
+        try:
+            return SFTPAttributes.from_stat(os.stat(path))
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+
+    def lstat(self, path):
+        path = self._realpath(path)
+        try:
+            return SFTPAttributes.from_stat(os.lstat(path))
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+
+    def open(self, path, flags, attr):
+        path = self._realpath(path)
+        try:
+            binary_flag = getattr(os, 'O_BINARY', 0)
+            flags |= binary_flag
+            mode = getattr(attr, 'st_mode', None)
+            if mode is not None:
+                fd = os.open(path, flags, mode)
+            else:
+                fd = os.open(path, flags, 0o666)
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+        if (flags & os.O_CREAT) and (attr is not None):
+            attr._flags &= ~attr.FLAG_PERMISSIONS
+            SFTPServer.set_file_attr(path, attr)
+        if flags & os.O_WRONLY:
+            if flags & os.O_APPEND:
+                fstr = 'ab'
+            else:
+                fstr = 'wb'
+        elif flags & os.O_RDWR:
+            if flags & os.O_APPEND:
+                fstr = 'a+b'
+            else:
+                fstr = 'r+b'
+        else:
+            fstr = 'rb'
+        try:
+            f = os.fdopen(fd, fstr)
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+        fobj = StubSFTPHandle(flags)
+        fobj.filename = path
+        fobj.readfile = f
+        fobj.writefile = f
+        return fobj
+
+    def remove(self, path):
+        path = self._realpath(path)
+        try:
+            os.remove(path)
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+        return SFTP_OK
+
+    def rename(self, oldpath, newpath):
+        oldpath = self._realpath(oldpath)
+        newpath = self._realpath(newpath)
+        try:
+            os.rename(oldpath, newpath)
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+        return SFTP_OK
+
+    def mkdir(self, path, attr):
+        path = self._realpath(path)
+        try:
+            os.mkdir(path)
+            if attr is not None:
+                SFTPServer.set_file_attr(path, attr)
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+        return SFTP_OK
+
+    def rmdir(self, path):
+        path = self._realpath(path)
+        try:
+            os.rmdir(path)
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+        return SFTP_OK
+
+    def chattr(self, path, attr):
+        path = self._realpath(path)
+        try:
+            SFTPServer.set_file_attr(path, attr)
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+        return SFTP_OK
+
+    def symlink(self, target_path, path):
+        path = self._realpath(path)
+        if (len(target_path) > 0) and (target_path[0] == '/'):
+            target_path = os.path.join(self.ROOT, target_path[1:])
+            if target_path[:2] == '//':
+                target_path = target_path[1:]
+        else:
+            abspath = os.path.join(os.path.dirname(path), target_path)
+            if abspath[:len(self.ROOT)] != self.ROOT:
+                target_path = '<error>'
+        try:
+            os.symlink(target_path, path)
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+        return SFTP_OK
+
+    def readlink(self, path):
+        path = self._realpath(path)
+        try:
+            symlink = os.readlink(path)
+        except OSError as e:
+            return SFTPServer.convert_errno(e.errno)
+        if os.path.isabs(symlink):
+            if symlink[:len(self.ROOT)] == self.ROOT:
+                symlink = symlink[len(self.ROOT):]
+                if (len(symlink) == 0) or (symlink[0] != '/'):
+                    symlink = '/' + symlink
+            else:
+                symlink = '<error>'
+        return symlink
+
+
+ssh_server = StubServer()
+
+
+###############################################################################
+#
+# Additional code for running the server as a standalone script.
+#
+###############################################################################
+
+__author__ = 'Steven Fernandez <steve@lonetwin.net>'
+
+import argparse
+import getpass
+import logging
+import socket
+import sys
+
+# - Defaults
+HOST, PORT = 'localhost', 3373
+ROOT = StubSFTPServer.ROOT
+LOG_LEVEL = logging.getLevelName(logging.INFO)
+MODE = 'threaded'
+BACKLOG = 10
+
+
+def setup_logging(level, mode):
+    if mode == 'threaded':
+        log_format = logging.BASIC_FORMAT
+    else:
+        log_format = '%(process)d:' + logging.BASIC_FORMAT
+
+    logging.basicConfig(format=log_format)
+
+    paramiko_logger = logging.getLogger('paramiko')
+    paramiko_logger.setLevel(logging.INFO)
+
+    logger = logging.getLogger(__name__)
+    logger.setLevel(level)
+    return logger
+
+
+def setup_transport(connection):
+    transport = paramiko.Transport(connection)
+    transport.add_server_key(StubSFTPServer.KEY)
+    transport.set_subsystem_handler('sftp', paramiko.SFTPServer, StubSFTPServer)
+    transport.start_server(server=ssh_server)
+    return transport
+
+
+def start_server(host=HOST, port=PORT, root=ROOT, keyfile=None, password=None, level=LOG_LEVEL, mode=MODE):
+    logger = setup_logging(level, mode)
+
+    if keyfile is None:
+        server_key = paramiko.RSAKey.generate(bits=1024)
+    else:
+        server_key = paramiko.RSAKey.from_private_key_file(keyfile, password=password)
+
+    StubSFTPServer.ROOT = root
+    StubSFTPServer.KEY = server_key
+
+    logger.debug('Serving %s over sftp/ssh at %s:%s', root, host, port)
+
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+    server_socket.bind((host, port))
+    server_socket.listen(BACKLOG)
+
+    sessions = []
     while True:
-        client, addr = sock.accept()
-        print(f"Connection from {addr}")
-        transport = paramiko.Transport(client)
-        transport.load_server_moduli()
-        transport.add_server_key(paramiko.RSAKey.generate(2048))
-        server = SFTPServer()
-        transport.start_server(server=server)
+        connection, addr = server_socket.accept()
+        if mode == 'forked':
+            logger.debug('Starting a new process')
+            pid = os.fork()
+            if pid == 0:
+                transport = setup_transport(connection)
+                channel = transport.accept()
+                if channel is not None:
+                    # Handle shell if no subsystem requested
+                    # If a subsystem (like sftp) is requested, paramiko handles it.
+                    if not channel.get_name():  # No subsystem means shell
+                        channel.send('Welcome to the stub SSH server!\r\n')
+                        channel.send('Type and it will echo back.\r\n')
+                        while True:
+                            data = channel.recv(1024)
+                            if not data:
+                                break
+                            channel.send(data)
+                        channel.close()
+                    transport.join()
+                sys.exit()
+            else:
+                sessions.append(pid)
+                pid, _ = os.waitpid(-1, os.WNOHANG)
+                if pid:
+                    sessions.remove(pid)
+        else:
+            logger.debug('Starting a new thread')
+            transport = setup_transport(connection)
+            channel = transport.accept()
+            sessions.append(channel)
+            if channel is not None:
+                # If no subsystem requested, provide a basic shell:
+                if not channel.get_name():  # means no 'sftp' or other subsystem
+                    channel.send('Welcome to the stub SSH server!\r\n')
+                    channel.send('Type something and it will be echoed back.\r\n')
+                    try:
+                        while True:
+                            data = channel.recv(1024)
+                            if not data:
+                                break
+                            channel.send(data)
+                    except Exception:
+                        pass
+                    channel.close()
+                # If sftp subsystem is requested, it's handled by paramiko automatically.
+                transport.join()
 
-        chan = transport.accept()
-        if chan is None:
-            continue
+        logger.debug('%s active sessions', len(sessions))
 
-        sftp = paramiko.SFTPServer(transport, chan)
-        sftp.set_subsystem_handler('sftp', paramiko.SFTPServerInterface)
+
+def main():
+    usage = """usage: sftpserver [options]"""
+    parser = argparse.ArgumentParser(usage=usage)
+    parser.add_argument(
+        '--host', dest='host', default=HOST,
+        help='listen on HOST [default: %(default)s]'
+    )
+    parser.add_argument(
+        '-p', '--port', dest='port', type=int, default=PORT,
+        help='listen on PORT [default: %(default)d]'
+    )
+    parser.add_argument(
+        '-l', '--level', dest='level', default=LOG_LEVEL,
+        help='Debug level: WARNING, INFO, DEBUG [default: %(default)s]'
+    )
+    parser.add_argument(
+        '-k', '--keyfile', dest='keyfile', metavar='FILE',
+        help='Path to private key, for example /tmp/test_rsa.key'
+    )
+    parser.add_argument(
+        '-P', '--password', help='Prompt for keyfile password', action="store_true"
+    )
+    parser.add_argument(
+        '-r', '--root', dest='root', default=ROOT,
+        help='Directory to serve as root for the server'
+    )
+    parser.add_argument(
+        '-m', '--mode', default=MODE, const=MODE, nargs='?', choices=('threaded', 'forked'),
+        help='Mode to run server in [default: %(default)s]'
+    )
+
+    args = parser.parse_args()
+
+    if not os.path.isdir(args.root):
+        parser.print_help()
+        sys.exit(-1)
+
+    password = None
+    if args.password:
+        password = getpass.getpass("Password: ")
+
+    start_server(args.host, args.port, args.root, args.keyfile, password, args.level, args.mode)
+
 
 if __name__ == '__main__':
-    start_sftp_server()
+    main()
