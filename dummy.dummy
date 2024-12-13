@@ -1,83 +1,90 @@
-I'll walk you through setting up SSH and SSHFS in a container with minimal authentication for local access. Here's a step-by-step guide:
+import os
+import paramiko
+import socket
+import threading
 
-1. Dockerfile Configuration:
-```dockerfile
-# Install SSH
-RUN apt-get update && apt-get install -y openssh-server
+# SSH Server Host Keys (Generate keys using `ssh-keygen -t rsa` if needed)
+HOST_KEY = paramiko.RSAKey.generate(2048)  # For demonstration; save this key securely in production
 
-# Configure SSH for passwordless, key-less access
-RUN mkdir -p /var/run/sshd
-RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config
-RUN sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-RUN sed -i 's/#PermitEmptyPasswords no/PermitEmptyPasswords yes/' /etc/ssh/sshd_config
-RUN sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config
+# Directory to serve for SFTP operations
+BASE_DIR = os.path.expanduser("~/sshfs_root")
 
-# Ensure correct permissions
-RUN chmod 755 /var/run/sshd
+# Ensure the directory exists
+os.makedirs(BASE_DIR, exist_ok=True)
 
-# Expose SSH port
-EXPOSE 22
+# SSH Server Configuration
+HOST = "0.0.0.0"
+PORT = 2222  # Default port for testing (change if needed)
 
-# Startup command
-CMD ["/usr/sbin/sshd", "-D"]
-```
+# Custom SFTP Server Handler
+class SFTPServer(paramiko.SFTPServerInterface):
+    def __init__(self, server, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.server = server
 
-2. Kubernetes/Container Configuration:
-```yaml
-containers:
-- name: your-container
-  ports:
-  - containerPort: 22
-  securityContext:
-    runAsUser: 1000  # appuser
-  volumeMounts:
-  - name: workspace
-    mountPath: /workspace
-```
+    def open(self, path, flags, attr):
+        real_path = os.path.join(BASE_DIR, path.strip("/"))
+        return open(real_path, flags)
 
-3. On Your Mac, SSH Configuration:
-```bash
-# Ensure SSH is installed (usually pre-installed on Mac)
-# If not, install via Homebrew
-brew install openssh
+    def list_folder(self, path):
+        real_path = os.path.join(BASE_DIR, path.strip("/"))
+        return [paramiko.SFTPAttributes.from_stat(os.stat(os.path.join(real_path, f))) for f in os.listdir(real_path)]
 
-# Generate an SSH config for easy connection
-# ~/.ssh/config
-Host container-ssh
-    HostName <container-ip-or-hostname>
-    User appuser
-    Port 22
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
-```
+# SSH Server Class
+class SSHServer(paramiko.ServerInterface):
+    def __init__(self):
+        self.event = threading.Event()
 
-4. Connecting via SSH:
-```bash
-# Direct SSH connection
-ssh container-ssh
+    def check_auth_none(self, username):
+        return paramiko.AUTH_SUCCESSFUL
 
-# SSHFS Mount
-sshfs container-ssh:/workspace /local/mountpoint
-```
+    def get_allowed_auths(self, username):
+        return "none"
 
-Key Considerations:
-- This is ONLY for fully trusted, internal environments
-- Completely removes authentication barriers
-- Relies on network-level security
-- Appropriate for development/testing scenarios
+    def check_channel_request(self, kind, chanid):
+        if kind == "session":
+            return paramiko.OPEN_SUCCEEDED
+        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
-Verification Steps:
-```bash
-# Verify SSH service is running in container
-ps aux | grep sshd
+    def check_channel_subsystem_request(self, channel, name):
+        if name == "sftp":
+            self.sftp_server = paramiko.SFTPServer(channel, SFTPServer, BASE_DIR)
+            return True
+        return False
 
-# Check port exposure
-netstat -tuln | grep :22
-```
+# Server Function
+def start_server():
+    print(f"Starting SSH Server on {HOST}:{PORT}")
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((HOST, PORT))
+    server_socket.listen(100)
 
-Potential Adjustments:
-- Ensure container network policies restrict external access
-- Use Kubernetes network policies to control traffic
-- Limit to specific trusted networks
+    while True:
+        client, addr = server_socket.accept()
+        print(f"Connection from {addr}")
+        try:
+            transport = paramiko.Transport(client)
+            transport.add_server_key(HOST_KEY)
+            ssh_server = SSHServer()
+            transport.start_server(server=ssh_server)
 
-Would you like me to elaborate on any of these steps or explain the security implications?
+            channel = transport.accept(20)
+            if channel is None:
+                continue
+            print("SSH Connection Established")
+
+            ssh_server.event.wait(10)
+            if not ssh_server.event.is_set():
+                raise Exception("Channel timeout")
+        except Exception as e:
+            print(f"Error: {e}")
+        finally:
+            client.close()
+
+# Main Entry Point
+if __name__ == "__main__":
+    try:
+        start_server()
+    except KeyboardInterrupt:
+        print("Stopping SSH Server")
