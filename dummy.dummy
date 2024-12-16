@@ -83,3 +83,43 @@ async def health_check():
 @app.get("/", summary="Root endpoint")
 async def root():
     return {"message": "Dev Pod Creation API is running"}
+
+====
+
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dev-pod-cleanup
+  namespace: kube-system  # Global resource can run in kube-system or another central namespace
+spec:
+  schedule: "0 0 * * *"  # Run every day at midnight
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: cleanup-serviceaccount  # ServiceAccount with required permissions
+          containers:
+          - name: pod-cleanup
+            image: bitnami/kubectl:latest  # Minimal image with curl and kubectl support
+            command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Starting cleanup of developer pods older than 5 days..."
+              
+              # Calculate the threshold date (5 days ago)
+              THRESHOLD_DATE=$(date -d "5 days ago" --utc +%Y-%m-%dT%H:%M:%SZ)
+
+              # List all pods labeled as developer pods and check their creation timestamps
+              kubectl get pods --all-namespaces -l app=tenant-dev-pod -o json | jq -r '
+                .items[] | select(.metadata.creationTimestamp < "'$THRESHOLD_DATE'") |
+                [.metadata.namespace, .metadata.name] | @tsv
+              ' | while read namespace name; do
+                  echo "Deleting pod $name in namespace $namespace"
+                  kubectl delete pod $name -n $namespace
+              done
+              
+              echo "Cleanup complete."
+
+          restartPolicy: OnFailure
