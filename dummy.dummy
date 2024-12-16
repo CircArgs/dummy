@@ -127,78 +127,69 @@ if __name__ == "__main__":
 
 
 
-#####
+# Dev creation server
 
-
-import os
 from fastapi import FastAPI, HTTPException
 from kubernetes import client, config
+import os
+import yaml
+import copy
 
-app = FastAPI(title="Dev Pod Creation API", version="1.0")
+# FastAPI app
+app = FastAPI(title="Dev Creation Server", version="1.0")
 
-# Load kubeconfig or in-cluster config
+# Kubernetes configuration: load in-cluster or local config
 try:
-    config.load_incluster_config()  # Use when running inside the cluster
-except config.ConfigException:
-    config.load_kube_config()  # Use for local testing
+    config.load_incluster_config()  # Use this if running inside Kubernetes
+except:
+    config.load_kube_config()  # Use this for local testing
 
-# Kubernetes API client
+# Kubernetes CoreV1 API client
 k8s_client = client.CoreV1Api()
 
-# Environment variables
-NAMESPACE = os.getenv("NAMESPACE", "default")
-DEPLOYMENT = os.getenv("DEPLOYMENT", "default-deployment")
-CRONJOB = os.getenv("CRONJOB", "default-cronjob")
-IMAGE = os.getenv("IMAGE", "your-workflow-image:latest")  # Image for workflow container
-SFTP_IMAGE = os.getenv("SFTP_IMAGE", "your-sftp-image:latest")
+# Path to the pod template file mounted from ConfigMap
+POD_TEMPLATE_FILE = "/app/templates/dev-pod-template.yaml"
 
-@app.post("/create-pod/{name}", summary="Create a new development pod")
+# Namespace for pod creation (from environment variables or fallback to 'default')
+NAMESPACE = os.getenv("NAMESPACE", "default")
+
+# Read the pod template file into memory at startup
+try:
+    with open(POD_TEMPLATE_FILE, "r") as f:
+        BASE_POD_TEMPLATE = yaml.safe_load(f)
+except FileNotFoundError:
+    raise FileNotFoundError("Pod template file not found. Ensure the ConfigMap is correctly mounted.")
+
+
+@app.post("/create-pod/{name}", summary="Create a pod using a template and dynamic name")
 async def create_pod(name: str):
     """
-    Endpoint to create a Kubernetes pod with an emptyDir volume.
-    Path Parameter:
-        - name: Name of the new pod
+    Create a new pod in Kubernetes using a pre-rendered template from a ConfigMap.
+    Replaces the 'NAME' placeholder in the pod name with the provided 'name'.
+    Adds a label 'created-by=dev-creation-server' to ensure the pods can be identified.
     """
-    pod_name = name
+    # Copy the base pod template
+    pod_manifest = copy.deepcopy(BASE_POD_TEMPLATE)
 
-    # Pod specification
-    pod_manifest = client.V1Pod(
-        metadata=client.V1ObjectMeta(name=pod_name, labels={"app": "tenant-dev-pod"}),
-        spec=client.V1PodSpec(
-            containers=[
-                client.V1Container(
-                    name="workflow-container",
-                    image=IMAGE,
-                    volume_mounts=[
-                        client.V1VolumeMount(mount_path="/workspace", name="workspace")
-                    ]
-                ),
-                client.V1Container(
-                    name="sftp-sidecar",
-                    image=SFTP_IMAGE,
-                    ports=[client.V1ContainerPort(container_port=22)],
-                    volume_mounts=[
-                        client.V1VolumeMount(mount_path="/workspace", name="workspace")
-                    ]
-                )
-            ],
-            volumes=[
-                client.V1Volume(
-                    name="workspace",
-                    empty_dir=client.V1EmptyDirVolumeSource()
-                )
-            ],
-            restart_policy="Never"
-        )
-    )
+    # Replace placeholder in the pod name
+    if "metadata" not in pod_manifest or "name" not in pod_manifest["metadata"]:
+        raise HTTPException(status_code=500, detail="Invalid pod template: 'metadata.name' is missing.")
 
-    # Create the pod
+    pod_manifest["metadata"]["name"] = pod_manifest["metadata"]["name"].replace("NAME", name)
+    pod_manifest["metadata"]["namespace"] = NAMESPACE
+
+    # Add a label to identify pods created by this server
+    if "labels" not in pod_manifest["metadata"]:
+        pod_manifest["metadata"]["labels"] = {}
+    pod_manifest["metadata"]["labels"]["created-by"] = "dev-creation-server"
+
     try:
+        # Create the pod in Kubernetes
         k8s_client.create_namespaced_pod(namespace=NAMESPACE, body=pod_manifest)
         return {
             "status": "Pod created successfully",
-            "pod_name": pod_name,
-            "namespace": NAMESPACE,
+            "pod_name": pod_manifest["metadata"]["name"],
+            "namespace": NAMESPACE
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -214,7 +205,10 @@ async def health_check():
 
 @app.get("/", summary="Root endpoint")
 async def root():
-    return {"message": "Dev Pod Creation API is running"}
+    """
+    Root endpoint to verify the API is up.
+    """
+    return {"message": "Dev Creation Server is running"}
 
 ====
 apiVersion: v1
