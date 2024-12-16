@@ -1,3 +1,135 @@
+# rsync server
+from fastapi import FastAPI, UploadFile, Form, HTTPException
+from fastapi.responses import JSONResponse
+from typing import Optional
+import os
+import shutil
+
+app = FastAPI()
+
+# Directory where the server will store files
+BASE_DIR = "server_files"
+
+# Ensure the directory exists
+os.makedirs(BASE_DIR, exist_ok=True)
+
+@app.post("/update-file/")
+async def update_file(file: UploadFile, filepath: Optional[str] = Form(...)):
+    """
+    Receive file content and save it to the specified filepath.
+    """
+    if not filepath:
+        raise HTTPException(status_code=400, detail="Filepath is required.")
+    
+    # Create full path
+    file_path = os.path.join(BASE_DIR, filepath)
+    
+    # Ensure directories exist
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    
+    # Write file to the server directory
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    return JSONResponse(content={"status": "success", "filepath": filepath})
+
+@app.delete("/delete-file/")
+async def delete_file(filepath: str = Form(...)):
+    """
+    Delete a file at the specified filepath.
+    """
+    file_path = os.path.join(BASE_DIR, filepath)
+    
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        return JSONResponse(content={"status": "deleted", "filepath": filepath})
+    else:
+        raise HTTPException(status_code=404, detail="File not found.")
+
+
+# rsync client
+import os
+import time
+import requests
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+# Configuration
+SERVER_URL = "http://localhost:8000"  # Adjust to match the server's forwarded port
+LOCAL_DIR = "local_files"            # Directory to monitor
+
+class FileSyncHandler(FileSystemEventHandler):
+    """
+    Handles file system changes and syncs them with the server.
+    """
+    def __init__(self, local_dir, server_url):
+        self.local_dir = local_dir
+        self.server_url = server_url
+    
+    def upload_file(self, file_path):
+        """
+        Upload a file to the server.
+        """
+        relative_path = os.path.relpath(file_path, self.local_dir)
+        with open(file_path, "rb") as file:
+            response = requests.post(
+                f"{self.server_url}/update-file/",
+                data={"filepath": relative_path},
+                files={"file": file}
+            )
+            print(f"Uploaded: {relative_path} - {response.status_code}")
+    
+    def delete_file(self, file_path):
+        """
+        Inform the server to delete a file.
+        """
+        relative_path = os.path.relpath(file_path, self.local_dir)
+        response = requests.delete(
+            f"{self.server_url}/delete-file/",
+            data={"filepath": relative_path}
+        )
+        print(f"Deleted: {relative_path} - {response.status_code}")
+
+    def on_created(self, event):
+        if not event.is_directory:
+            print(f"File created: {event.src_path}")
+            self.upload_file(event.src_path)
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            print(f"File modified: {event.src_path}")
+            self.upload_file(event.src_path)
+    
+    def on_deleted(self, event):
+        if not event.is_directory:
+            print(f"File deleted: {event.src_path}")
+            self.delete_file(event.src_path)
+
+def main():
+    # Ensure the directory exists
+    os.makedirs(LOCAL_DIR, exist_ok=True)
+    
+    event_handler = FileSyncHandler(LOCAL_DIR, SERVER_URL)
+    observer = Observer()
+    observer.schedule(event_handler, LOCAL_DIR, recursive=True)
+    
+    print(f"Monitoring directory: {LOCAL_DIR}")
+    try:
+        observer.start()
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
+
+if __name__ == "__main__":
+    main()
+
+
+
+#####
+
+
 import os
 from fastapi import FastAPI, HTTPException
 from kubernetes import client, config
