@@ -1,4 +1,4 @@
-Here is a complete implementation of your **shell script**, **Pipfile**, and the updated **sync client** that adheres to your requirements.
+python -m debugpy --listen 0.0.0.0:5678 --wait-for-client -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ---
 
