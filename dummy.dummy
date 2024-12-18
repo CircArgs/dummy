@@ -1,75 +1,161 @@
-# rsync server
-from fastapi import FastAPI, UploadFile, Form, HTTPException
-from fastapi.responses import JSONResponse
-from typing import Optional
-import os
-import shutil
+Here is a complete implementation of your **shell script**, **Pipfile**, and the updated **sync client** that adheres to your requirements.
 
-app = FastAPI()
+---
 
-# Directory where the server will store files
-BASE_DIR = "server_files"
+## **1. Pipenv Pipfile**
 
-# Ensure the directory exists
-os.makedirs(BASE_DIR, exist_ok=True)
+This Pipfile will set up the Python environment with the required libraries for the FastAPI sync client.
 
-@app.post("/update-file/")
-async def update_file(file: UploadFile, filepath: Optional[str] = Form(...)):
-    """
-    Receive file content and save it to the specified filepath.
-    """
-    if not filepath:
-        raise HTTPException(status_code=400, detail="Filepath is required.")
-    
-    # Create full path
-    file_path = os.path.join(BASE_DIR, filepath)
-    
-    # Ensure directories exist
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    
-    # Write file to the server directory
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    return JSONResponse(content={"status": "success", "filepath": filepath})
+### **Pipfile**
+```toml
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
 
-@app.delete("/delete-file/")
-async def delete_file(filepath: str = Form(...)):
-    """
-    Delete a file at the specified filepath.
-    """
-    file_path = os.path.join(BASE_DIR, filepath)
-    
-    if os.path.exists(file_path):
-        os.remove(file_path)
-        return JSONResponse(content={"status": "deleted", "filepath": filepath})
-    else:
-        raise HTTPException(status_code=404, detail="File not found.")
+[packages]
+requests = "*"
+watchdog = "*"
 
+[requires]
+python_version = "3.8"
+```
 
-# rsync client
+---
+
+## **2. Shell Script**
+
+This script orchestrates the entire process: authentication, identifying the correct pod, port forwarding, and starting the sync client.
+
+### **sync_dev.sh**
+```bash
+#!/bin/bash
+
+set -e
+
+# --- User-provided arguments ---
+NAMESPACE=""
+DEV_POD_NAME=""
+DEPLOYMENT_SUBNAME="dev-server"  # Default subname for dev deployment
+SYNC_ROOT_PATH=$(pwd)           # Default root path (current directory)
+
+# Parse arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -n|--namespace) NAMESPACE="$2"; shift ;;
+        -p|--pod-name) DEV_POD_NAME="$2"; shift ;;
+        -d|--deployment-subname) DEPLOYMENT_SUBNAME="$2"; shift ;;
+        -r|--sync-root) SYNC_ROOT_PATH="$2"; shift ;;
+        *) echo "Unknown parameter: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+if [[ -z "$NAMESPACE" || -z "$DEV_POD_NAME" ]]; then
+    echo "Error: Namespace (-n) and Pod Name (-p) are required arguments."
+    exit 1
+fi
+
+# --- Company-specific authentication commands ---
+echo "Running company-specific authentication..."
+# Fill in your company-specific auth logic here (e.g., SSO, cloud login, etc.)
+
+# --- Step 1: Identify Deployment and Pod ---
+echo "Locating the development pod in namespace '$NAMESPACE'..."
+DEV_DEPLOYMENT=$(kubectl get deployments -n "$NAMESPACE" \
+    --no-headers -o custom-columns=":metadata.name" | grep "$DEPLOYMENT_SUBNAME")
+
+if [[ -z "$DEV_DEPLOYMENT" ]]; then
+    echo "Error: No deployment found matching '$DEPLOYMENT_SUBNAME' in namespace '$NAMESPACE'."
+    exit 1
+fi
+
+POD_NAME=$(kubectl get pods -n "$NAMESPACE" \
+    --selector="app=$DEV_DEPLOYMENT" \
+    --no-headers -o custom-columns=":metadata.name" | head -n 1)
+
+if [[ -z "$POD_NAME" ]]; then
+    echo "Error: No pod found for deployment '$DEV_DEPLOYMENT'."
+    exit 1
+fi
+
+echo "Found pod: $POD_NAME"
+
+# --- Step 2: Port Forward to the Server ---
+LOCAL_PORT=30000
+while lsof -i:$LOCAL_PORT >/dev/null 2>&1; do
+    ((LOCAL_PORT++))
+done
+
+echo "Port forwarding pod '$POD_NAME' to localhost:$LOCAL_PORT..."
+kubectl port-forward "$POD_NAME" 8000:$LOCAL_PORT -n "$NAMESPACE" &
+PF_PID1=$!
+
+# Wait for port forward to be established
+sleep 5
+
+# --- Step 3: Call the Create Pod Endpoint ---
+echo "Creating development pod '$DEV_POD_NAME'..."
+CREATE_RESPONSE=$(curl -s -X POST "http://localhost:$LOCAL_PORT/create-pod/$DEV_POD_NAME")
+
+if echo "$CREATE_RESPONSE" | grep -q "Pod created successfully"; then
+    echo "Development pod '$DEV_POD_NAME' created successfully."
+else
+    echo "Error: Failed to create development pod. Response: $CREATE_RESPONSE"
+    kill $PF_PID1
+    exit 1
+fi
+
+# --- Step 4: Wait for the Dev Pod and Port Forward ---
+echo "Waiting for the development pod to be ready..."
+while [[ $(kubectl get pods "$DEV_POD_NAME" -n "$NAMESPACE" -o jsonpath='{.status.phase}') != "Running" ]]; do
+    sleep 2
+done
+
+LOCAL_PORT2=$((LOCAL_PORT + 1))
+echo "Port forwarding to new dev pod '$DEV_POD_NAME' at localhost:$LOCAL_PORT2..."
+kubectl port-forward "$DEV_POD_NAME" 8000:$LOCAL_PORT2 -n "$NAMESPACE" &
+PF_PID2=$!
+
+# Wait for port forward to be ready
+sleep 5
+
+# --- Step 5: Start the Sync Client ---
+SYNC_DIR="$SYNC_ROOT_PATH/src"
+if [[ ! -d "$SYNC_DIR" ]]; then
+    echo "Error: Sync directory '$SYNC_DIR' does not exist."
+    kill $PF_PID1 $PF_PID2
+    exit 1
+fi
+
+echo "Starting sync client to monitor '$SYNC_DIR'..."
+pipenv run python client.py --server-port $LOCAL_PORT2 --sync-dir "$SYNC_DIR"
+
+# Cleanup
+kill $PF_PID1 $PF_PID2
+```
+
+---
+
+## **3. Updated Sync Client**
+
+The sync client now accepts the server port and sync directory as arguments.
+
+### **Updated client.py**
+```python
 import os
 import time
 import requests
+import argparse
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# Configuration
-SERVER_URL = "http://localhost:8000"  # Adjust to match the server's forwarded port
-LOCAL_DIR = "local_files"            # Directory to monitor
-
 class FileSyncHandler(FileSystemEventHandler):
-    """
-    Handles file system changes and syncs them with the server.
-    """
     def __init__(self, local_dir, server_url):
         self.local_dir = local_dir
         self.server_url = server_url
-    
+
     def upload_file(self, file_path):
-        """
-        Upload a file to the server.
-        """
         relative_path = os.path.relpath(file_path, self.local_dir)
         with open(file_path, "rb") as file:
             response = requests.post(
@@ -78,11 +164,8 @@ class FileSyncHandler(FileSystemEventHandler):
                 files={"file": file}
             )
             print(f"Uploaded: {relative_path} - {response.status_code}")
-    
+
     def delete_file(self, file_path):
-        """
-        Inform the server to delete a file.
-        """
         relative_path = os.path.relpath(file_path, self.local_dir)
         response = requests.delete(
             f"{self.server_url}/delete-file/",
@@ -92,30 +175,41 @@ class FileSyncHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         if not event.is_directory:
-            print(f"File created: {event.src_path}")
             self.upload_file(event.src_path)
 
     def on_modified(self, event):
         if not event.is_directory:
-            print(f"File modified: {event.src_path}")
             self.upload_file(event.src_path)
-    
+
     def on_deleted(self, event):
         if not event.is_directory:
-            print(f"File deleted: {event.src_path}")
             self.delete_file(event.src_path)
 
 def main():
-    # Ensure the directory exists
-    os.makedirs(LOCAL_DIR, exist_ok=True)
-    
-    event_handler = FileSyncHandler(LOCAL_DIR, SERVER_URL)
+    parser = argparse.ArgumentParser(description="Sync client for file updates")
+    parser.add_argument("--server-port", required=True, help="Port the server is running on")
+    parser.add_argument("--sync-dir", required=True, help="Directory to monitor for changes")
+    args = parser.parse_args()
+
+    server_url = f"http://localhost:{args.server_port}"
+    sync_dir = args.sync_dir
+
+    print(f"Monitoring '{sync_dir}' and syncing with server at {server_url}")
+    os.makedirs(sync_dir, exist_ok=True)
+
+    # Initial sync
+    for root, _, files in os.walk(sync_dir):
+        for file in files:
+            full_path = os.path.join(root, file)
+            FileSyncHandler(sync_dir, server_url).upload_file(full_path)
+
+    # Monitor changes
+    event_handler = FileSyncHandler(sync_dir, server_url)
     observer = Observer()
-    observer.schedule(event_handler, LOCAL_DIR, recursive=True)
-    
-    print(f"Monitoring directory: {LOCAL_DIR}")
+    observer.schedule(event_handler, sync_dir, recursive=True)
+    observer.start()
+
     try:
-        observer.start()
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
@@ -124,157 +218,27 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-# Dev creation server
-
-from fastapi import FastAPI, HTTPException
-from kubernetes import client, config
-import os
-import yaml
-import copy
-
-# FastAPI app
-app = FastAPI(title="Dev Creation Server", version="1.0")
-
-# Kubernetes configuration: load in-cluster or local config
-try:
-    config.load_incluster_config()  # Use this if running inside Kubernetes
-except:
-    config.load_kube_config()  # Use this for local testing
-
-# Kubernetes CoreV1 API client
-k8s_client = client.CoreV1Api()
-
-# Path to the pod template file mounted from ConfigMap
-POD_TEMPLATE_FILE = "/app/templates/dev-pod-template.yaml"
-
-# Namespace for pod creation (from environment variables or fallback to 'default')
-NAMESPACE = os.getenv("NAMESPACE", "default")
-
-# Read the pod template file into memory at startup
-try:
-    with open(POD_TEMPLATE_FILE, "r") as f:
-        BASE_POD_TEMPLATE = yaml.safe_load(f)
-except FileNotFoundError:
-    raise FileNotFoundError("Pod template file not found. Ensure the ConfigMap is correctly mounted.")
-
-
-@app.post("/create-pod/{name}", summary="Create a pod using a template and dynamic name")
-async def create_pod(name: str):
-    """
-    Create a new pod in Kubernetes using a pre-rendered template from a ConfigMap.
-    Replaces the 'NAME' placeholder in the pod name with the provided 'name'.
-    Adds a label 'created-by=dev-creation-server' to ensure the pods can be identified.
-    """
-    # Copy the base pod template
-    pod_manifest = copy.deepcopy(BASE_POD_TEMPLATE)
-
-    # Replace placeholder in the pod name
-    if "metadata" not in pod_manifest or "name" not in pod_manifest["metadata"]:
-        raise HTTPException(status_code=500, detail="Invalid pod template: 'metadata.name' is missing.")
-
-    pod_manifest["metadata"]["name"] = pod_manifest["metadata"]["name"].replace("NAME", name)
-    pod_manifest["metadata"]["namespace"] = NAMESPACE
-
-    # Add a label to identify pods created by this server
-    if "labels" not in pod_manifest["metadata"]:
-        pod_manifest["metadata"]["labels"] = {}
-    pod_manifest["metadata"]["labels"]["created-by"] = "dev-creation-server"
-
-    try:
-        # Create the pod in Kubernetes
-        k8s_client.create_namespaced_pod(namespace=NAMESPACE, body=pod_manifest)
-        return {
-            "status": "Pod created successfully",
-            "pod_name": pod_manifest["metadata"]["name"],
-            "namespace": NAMESPACE
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/health", summary="Healthcheck endpoint")
-async def health_check():
-    """
-    Healthcheck endpoint to verify the service is running.
-    """
-    return {"status": "OK", "message": "Service is healthy"}
-
-
-@app.get("/", summary="Root endpoint")
-async def root():
-    """
-    Root endpoint to verify the API is up.
-    """
-    return {"message": "Dev Creation Server is running"}
-
-====
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: cleanup-serviceaccount
-  namespace: kube-system
+```
 
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: cleanup-pod-role
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["list", "delete"]
+
+## **How to Run**
+
+1. **Install Dependencies**:
+   ```bash
+   pip install pipenv
+   pipenv install
+   ```
+
+2. **Run the Script**:
+   ```bash
+   chmod +x sync_dev.sh
+   ./sync_dev.sh -n tenant-namespace -p my-dev-pod -d dev-server -r /path/to/sync
+   ```
+
+3. **Sync Directory**:
+   - Ensure `/path/to/sync/src` exists.
 
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: cleanup-pod-rolebinding
-subjects:
-  - kind: ServiceAccount
-    name: cleanup-serviceaccount
-    namespace: kube-system
-roleRef:
-  kind: ClusterRole
-  name: cleanup-pod-role
-  apiGroup: rbac.authorization.k8s.io
----
 
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: dev-pod-cleanup
-  namespace: kube-system  # Global resource can run in kube-system or another central namespace
-spec:
-  schedule: "0 0 * * *"  # Run every day at midnight
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          serviceAccountName: cleanup-serviceaccount  # ServiceAccount with required permissions
-          containers:
-          - name: pod-cleanup
-            image: bitnami/kubectl:latest  # Minimal image with curl and kubectl support
-            command:
-            - /bin/sh
-            - -c
-            - |
-              echo "Starting cleanup of developer pods older than 5 days..."
-              
-              # Calculate the threshold date (5 days ago)
-              THRESHOLD_DATE=$(date -d "5 days ago" --utc +%Y-%m-%dT%H:%M:%SZ)
-
-              # List all pods labeled as developer pods and check their creation timestamps
-              kubectl get pods --all-namespaces -l app=tenant-dev-pod -o json | jq -r '
-                .items[] | select(.metadata.creationTimestamp < "'$THRESHOLD_DATE'") |
-                [.metadata.namespace, .metadata.name] | @tsv
-              ' | while read namespace name; do
-                  echo "Deleting pod $name in namespace $namespace"
-                  kubectl delete pod $name -n $namespace
-              done
-              
-              echo "Cleanup complete."
-
-          restartPolicy: OnFailure
+This approach fulfills all requirements, provides flexibility for arguments, and ensures the sync client dynamically uses the correct ports and directories. Let me know if you need further refinements! 🚀
