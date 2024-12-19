@@ -1,3 +1,59 @@
+#!/bin/bash
+
+# Function to start the main FastAPI app
+start_fastapi() {
+    uvicorn main:app --host 0.0.0.0 --port 8080 &
+    FASTAPI_PID=$!
+}
+
+# Function to start debugpy if DEBUG=true
+start_debugpy() {
+    python3.10 -m debugpy --listen 0.0.0.0:5678 --wait-for-client &
+    DEBUGPY_PID=$!
+}
+
+# Function to stop debugpy
+stop_debugpy() {
+    if [ -n "$DEBUGPY_PID" ]; then
+        echo "Stopping debugpy (PID: $DEBUGPY_PID)..."
+        kill $DEBUGPY_PID
+        wait $DEBUGPY_PID 2>/dev/null
+        DEBUGPY_PID=""
+    fi
+}
+
+# Start FastAPI app initially
+start_fastapi
+
+DEBUG_STATE=""
+
+# Monitor the DEBUG environment variable
+while true; do
+    # Check the current DEBUG value
+    if [ "$DEBUG" = "true" ] && [ "$DEBUG_STATE" != "true" ]; then
+        echo "DEBUG=true: Starting debugpy..."
+        start_debugpy
+        DEBUG_STATE="true"
+    elif [ "$DEBUG" != "true" ] && [ "$DEBUG_STATE" = "true" ]; then
+        echo "DEBUG=false: Stopping debugpy..."
+        stop_debugpy
+        DEBUG_STATE="false"
+    fi
+
+    # Sleep for a few seconds before rechecking
+    sleep 2
+
+    # Check if FastAPI is still running, restart if needed
+    if ! kill -0 $FASTAPI_PID 2>/dev/null; then
+        echo "FastAPI process terminated. Restarting..."
+        start_fastapi
+    fi
+done
+
+
+=======
+
+
 import pytest
 import respx
 from httpx import AsyncClient, Response
