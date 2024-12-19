@@ -1,3 +1,24 @@
+from unittest.mock import AsyncMock, patch
+
+@pytest.mark.asyncio
+async def test_list_tools(client):
+    with patch('httpx.AsyncClient', new_callable=AsyncMock) as mock_client:
+        mock_instance = mock_client.return_value
+        mock_instance.__aenter__.return_value = mock_instance
+        mock_instance.__aexit__.return_value = AsyncMock()
+        
+        # Mock the GET request response
+        mock_instance.get.return_value.json = AsyncMock(return_value=["tool1", "tool2"])
+        mock_instance.get.return_value.raise_for_status = AsyncMock()
+
+        # Call the method
+        tools = await client.list_tools()
+        
+        # Assertions
+        assert tools == ["tool1", "tool2"]
+        mock_instance.get.assert_called_once_with("http://testserver/list_tools")
+
+
 python -m debugpy --listen 0.0.0.0:5678 --wait-for-client -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ---
