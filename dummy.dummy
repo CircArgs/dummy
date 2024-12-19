@@ -1,25 +1,102 @@
-from unittest.mock import AsyncMock, patch
+import pytest
+import respx
+from httpx import AsyncClient, Response
+from toolhub_client.client import ToolHubClient, Tool
+
+TOOLHUB_SERVER_URL = "http://test.toolhub.com"
+
+@pytest.fixture
+def client():
+    """Fixture to initialize the ToolHubClient."""
+    return ToolHubClient(toolhub_server_uri=TOOLHUB_SERVER_URL)
 
 @pytest.mark.asyncio
 async def test_list_tools(client):
-    with patch('httpx.AsyncClient', new_callable=AsyncMock) as mock_client:
-        mock_instance = mock_client.return_value
-        mock_instance.__aenter__.return_value = mock_instance
-        mock_instance.__aexit__.return_value = AsyncMock()
-        
-        # Mock the GET request response
-        mock_instance.get.return_value.json = AsyncMock(return_value=["tool1", "tool2"])
-        mock_instance.get.return_value.raise_for_status = AsyncMock()
+    """Test the list_tools method."""
+    namespace = "test_namespace"
+    tools_mock = ["tool1", "tool2"]
 
-        # Call the method
-        tools = await client.list_tools()
-        
-        # Assertions
-        assert tools == ["tool1", "tool2"]
-        mock_instance.get.assert_called_once_with("http://testserver/list_tools")
+    with respx.mock(base_url=TOOLHUB_SERVER_URL) as respx_mock:
+        route = respx_mock.get(f"/list_tools/{namespace}").mock(
+            return_value=Response(200, json=tools_mock)
+        )
+        result = await client.list_tools(namespace)
 
+        assert route.called
+        assert result == tools_mock
 
-python -m debugpy --listen 0.0.0.0:5678 --wait-for-client -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+@pytest.mark.asyncio
+async def test_get_schema(client):
+    """Test the get_schema method."""
+    tool_name = "test_tool"
+    namespace = "test_namespace"
+    schema_mock = {"name": tool_name, "description": "A test tool"}
+
+    with respx.mock(base_url=TOOLHUB_SERVER_URL) as respx_mock:
+        route = respx_mock.get(f"/tool/{namespace}/{tool_name}").mock(
+            return_value=Response(200, json=schema_mock)
+        )
+        result = await client.get_schema(tool_name, namespace)
+
+        assert route.called
+        assert result == schema_mock
+
+@pytest.mark.asyncio
+async def test_invoke(client):
+    """Test the invoke method."""
+    tool_name = "test_tool"
+    namespace = "test_namespace"
+    arguments = {"param1": "value1"}
+    response_mock = {"result": "success"}
+
+    with respx.mock(base_url=TOOLHUB_SERVER_URL) as respx_mock:
+        route = respx_mock.post(f"/use_tool/{namespace}/{tool_name}").mock(
+            return_value=Response(200, json=response_mock)
+        )
+        result = await client.invoke(tool_name, arguments, {}, namespace)
+
+        assert route.called
+        assert result == response_mock
+
+@pytest.mark.asyncio
+async def test_get_tool(client):
+    """Test the get_tool method."""
+    tool_name = "test_tool"
+    namespace = "test_namespace"
+    schema_mock = {"name": tool_name, "description": "A test tool"}
+
+    with respx.mock(base_url=TOOLHUB_SERVER_URL) as respx_mock:
+        route = respx_mock.get(f"/tool/{namespace}/{tool_name}").mock(
+            return_value=Response(200, json=schema_mock)
+        )
+        tool = await client.get_tool(tool_name, namespace)
+
+        assert route.called
+        assert isinstance(tool, Tool)
+        assert tool.name == tool_name
+        assert tool.description == schema_mock["description"]
+
+@pytest.mark.asyncio
+async def test_call(client):
+    """Test the call method for invoking a tool."""
+    tool_name = "test_tool"
+    namespace = "test_namespace"
+    arguments = {"param1": "value1"}
+    response_mock = {"result": "called successfully"}
+
+    with respx.mock(base_url=TOOLHUB_SERVER_URL) as respx_mock:
+        respx_mock.get(f"/tool/{namespace}/{tool_name}").mock(
+            return_value=Response(200, json={"name": tool_name, "description": "A test tool"})
+        )
+        respx_mock.post(f"/use_tool/{namespace}/{tool_name}").mock(
+            return_value=Response(200, json=response_mock)
+        )
+
+        tool = await client.get_tool(tool_name, namespace)
+        result = await tool(arguments)
+
+        assert result == response_mock
+
 
 ---
 
