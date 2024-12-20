@@ -1,111 +1,36 @@
-import pytest
-from unittest.mock import AsyncMock, patch
-from toolhub_client.client import ToolHubClient, Tool
+import os
 
-TOOLHUB_SERVER_URL = "http://test.toolhub.com"
+def find_directory_upwards(target_dir_name, start_path=None):
+    """
+    Traverse upward from the start_path and look for a unique directory with the given name.
 
-@pytest.fixture
-def client():
-    """Fixture to initialize the ToolHubClient."""
-    return ToolHubClient(toolhub_server_uri=TOOLHUB_SERVER_URL)
+    Args:
+        target_dir_name (str): The name of the directory to search for.
+        start_path (str, optional): The starting directory path. Defaults to the current working directory.
 
-@pytest.mark.asyncio
-async def test_list_tools(client):
-    """Test the list_tools method."""
-    namespace = "test_namespace"
-    tools_mock = ["tool1", "tool2"]
+    Returns:
+        str: The full path to the found directory, or None if not found.
+    """
+    if start_path is None:
+        start_path = os.getcwd()
 
-    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-        # Fix: json method must return the data directly
-        mock_get.return_value.json.return_value = tools_mock
-        mock_get.return_value.raise_for_status = AsyncMock()
+    current_path = start_path
 
-        result = await client.list_tools(namespace)
+    while True:
+        # Check if the target directory exists in the current directory
+        for entry in os.listdir(current_path):
+            full_path = os.path.join(current_path, entry)
+            if os.path.isdir(full_path) and entry == target_dir_name:
+                return full_path
 
-        mock_get.assert_called_once_with(f"{TOOLHUB_SERVER_URL}/list_tools/{namespace}")
-        assert result == tools_mock
+        # Move up one directory level
+        parent_path = os.path.abspath(os.path.join(current_path, os.pardir))
+        
+        # Stop if we reach the root directory
+        if parent_path == current_path:
+            break
 
-@pytest.mark.asyncio
-async def test_get_schema(client):
-    """Test the get_schema method."""
-    tool_name = "test_tool"
-    namespace = "test_namespace"
-    schema_mock = {"name": tool_name, "description": "A test tool"}
+        current_path = parent_path
 
-    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-        # Fix: json method must return the data directly
-        mock_get.return_value.json.return_value = schema_mock
-        mock_get.return_value.raise_for_status = AsyncMock()
-
-        result = await client.get_schema(tool_name, namespace)
-
-        mock_get.assert_called_once_with(f"{TOOLHUB_SERVER_URL}/tool/{namespace}/{tool_name}")
-        assert result == schema_mock
-
-@pytest.mark.asyncio
-async def test_invoke(client):
-    """Test the invoke method."""
-    tool_name = "test_tool"
-    namespace = "test_namespace"
-    arguments = {"param1": "value1"}
-    response_mock = {"result": "success"}
-
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-        # Fix: json method must return the data directly
-        mock_post.return_value.json.return_value = response_mock
-        mock_post.return_value.raise_for_status = AsyncMock()
-
-        result = await client.invoke(tool_name, arguments, {}, namespace)
-
-        mock_post.assert_called_once_with(
-            f"{TOOLHUB_SERVER_URL}/use_tool/{namespace}/{tool_name}",
-            json={"arguments": arguments},
-        )
-        assert result == response_mock
-
-@pytest.mark.asyncio
-async def test_get_tool(client):
-    """Test the get_tool method."""
-    tool_name = "test_tool"
-    namespace = "test_namespace"
-    schema_mock = {"name": tool_name, "description": "A test tool"}
-
-    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-        # Fix: json method must return the data directly
-        mock_get.return_value.json.return_value = schema_mock
-        mock_get.return_value.raise_for_status = AsyncMock()
-
-        tool = await client.get_tool(tool_name, namespace)
-
-        mock_get.assert_called_once_with(f"{TOOLHUB_SERVER_URL}/tool/{namespace}/{tool_name}")
-        assert isinstance(tool, Tool)
-        assert tool.name == tool_name
-        assert tool.description == schema_mock["description"]
-
-@pytest.mark.asyncio
-async def test_call(client):
-    """Test the call method for invoking a tool."""
-    tool_name = "test_tool"
-    namespace = "test_namespace"
-    arguments = {"param1": "value1"}
-    schema_mock = {"name": tool_name, "description": "A test tool"}
-    response_mock = {"result": "called successfully"}
-
-    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get, \
-         patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-        # Fix: json method must return the data directly
-        mock_get.return_value.json.return_value = schema_mock
-        mock_get.return_value.raise_for_status = AsyncMock()
-
-        mock_post.return_value.json.return_value = response_mock
-        mock_post.return_value.raise_for_status = AsyncMock()
-
-        tool = await client.get_tool(tool_name, namespace)
-        result = await tool(arguments)
-
-        mock_get.assert_called_once_with(f"{TOOLHUB_SERVER_URL}/tool/{namespace}/{tool_name}")
-        mock_post.assert_called_once_with(
-            f"{TOOLHUB_SERVER_URL}/use_tool/{namespace}/{tool_name}",
-            json={"arguments": arguments},
-        )
-        assert result == response_mock
+    # If the directory was not found
+    return None
