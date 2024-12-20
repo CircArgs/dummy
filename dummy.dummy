@@ -16,8 +16,8 @@ async def test_list_tools(client):
     tools_mock = ["tool1", "tool2"]
 
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-        # Mock the response JSON
-        mock_get.return_value.json = AsyncMock(return_value=tools_mock)
+        # Fix: json method must return the data directly
+        mock_get.return_value.json.return_value = tools_mock
         mock_get.return_value.raise_for_status = AsyncMock()
 
         result = await client.list_tools(namespace)
@@ -33,7 +33,8 @@ async def test_get_schema(client):
     schema_mock = {"name": tool_name, "description": "A test tool"}
 
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-        mock_get.return_value.json = AsyncMock(return_value=schema_mock)
+        # Fix: json method must return the data directly
+        mock_get.return_value.json.return_value = schema_mock
         mock_get.return_value.raise_for_status = AsyncMock()
 
         result = await client.get_schema(tool_name, namespace)
@@ -50,7 +51,8 @@ async def test_invoke(client):
     response_mock = {"result": "success"}
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-        mock_post.return_value.json = AsyncMock(return_value=response_mock)
+        # Fix: json method must return the data directly
+        mock_post.return_value.json.return_value = response_mock
         mock_post.return_value.raise_for_status = AsyncMock()
 
         result = await client.invoke(tool_name, arguments, {}, namespace)
@@ -69,7 +71,8 @@ async def test_get_tool(client):
     schema_mock = {"name": tool_name, "description": "A test tool"}
 
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-        mock_get.return_value.json = AsyncMock(return_value=schema_mock)
+        # Fix: json method must return the data directly
+        mock_get.return_value.json.return_value = schema_mock
         mock_get.return_value.raise_for_status = AsyncMock()
 
         tool = await client.get_tool(tool_name, namespace)
@@ -90,12 +93,11 @@ async def test_call(client):
 
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get, \
          patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-        # Mock get_schema
-        mock_get.return_value.json = AsyncMock(return_value=schema_mock)
+        # Fix: json method must return the data directly
+        mock_get.return_value.json.return_value = schema_mock
         mock_get.return_value.raise_for_status = AsyncMock()
 
-        # Mock invoke
-        mock_post.return_value.json = AsyncMock(return_value=response_mock)
+        mock_post.return_value.json.return_value = response_mock
         mock_post.return_value.raise_for_status = AsyncMock()
 
         tool = await client.get_tool(tool_name, namespace)
