@@ -1,1 +1,84 @@
-git config --global url."ssh://git@github.com/".insteadOf https://github.com/
+import json
+from typing import Any, Dict
+from pydantic import BaseModel, create_model
+
+
+def serde_model(model_cls: type[BaseModel]) -> str:
+    """
+    Serialize a Pydantic model class definition into a JSON string
+    representing its JSON schema.
+    """
+    schema_dict = model_cls.schema()
+    return json.dumps(schema_dict)
+
+
+def deserde_model(schema_json: str) -> type[BaseModel]:
+    """
+    Deserialize a JSON schema (as a string) back into a Pydantic model class.
+    This function attempts a simple mapping from JSON schema types to Python types.
+    """
+    schema_dict = json.loads(schema_json)
+    properties = schema_dict.get("properties", {})
+    required_fields = schema_dict.get("required", [])
+    model_name = schema_dict.get("title", "DynamicModel")
+
+    # Simple type map; extend as needed
+    type_map: Dict[str, Any] = {
+        "string": str,
+        "integer": int,
+        "number": float,
+        "boolean": bool,
+        # Add more mappings or logic here if needed.
+    }
+
+    fields = {}
+    for field_name, field_info in properties.items():
+        json_type = field_info.get("type", "string")
+        field_type = type_map.get(json_type, Any)
+        # If field is required, default = Ellipsis (no default)
+        # If field is optional, default = None
+        default = None if field_name not in required_fields else ...
+        fields[field_name] = (field_type, default)
+
+    DynamicModel = create_model(model_name, **fields)  # type: ignore
+    return DynamicModel
+
+
+import pytest
+from pydantic import BaseModel
+from serde import serde_model, deserde_model
+
+
+class OriginalModel(BaseModel):
+    name: str
+    age: int
+    is_active: bool = True
+
+
+def test_serde_round_trip():
+    # Serialize the OriginalModel schema
+    schema_json = serde_model(OriginalModel)
+    assert isinstance(schema_json, str), "Serialization should return a JSON string"
+
+    # Deserialize back into a dynamic model
+    DynamicModel = deserde_model(schema_json)
+    assert issubclass(DynamicModel, BaseModel), "Deserialization should return a Pydantic model class"
+
+    # Check that fields match
+    dynamic_model_instance = DynamicModel(name="Alice", age=30, is_active=False)
+    assert dynamic_model_instance.name == "Alice"
+    assert dynamic_model_instance.age == 30
+    assert dynamic_model_instance.is_active is False
+
+    # The dynamic model should also reject incorrect types
+    with pytest.raises(ValueError):
+        DynamicModel(name="Bob", age="not an integer")
+
+def test_missing_required_fields():
+    # Serialize the OriginalModel schema
+    schema_json = serde_model(OriginalModel)
+    DynamicModel = deserde_model(schema_json)
+
+    # 'name' and 'age' are required fields, check if omission fails
+    with pytest.raises(ValueError):
+        DynamicModel()
