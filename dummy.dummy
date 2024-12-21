@@ -1,84 +1,340 @@
+from typing import Any, Type, Optional, Union, get_origin, get_args
+from pydantic import BaseModel, create_model, ValidationError
 import json
-from typing import Any, Dict
-from pydantic import BaseModel, create_model
 
+class UnsupportedModelError(Exception):
+    pass
 
-def serde_model(model_cls: type[BaseModel]) -> str:
-    """
-    Serialize a Pydantic model class definition into a JSON string
-    representing its JSON schema.
-    """
-    schema_dict = model_cls.schema()
+def serde_model(model_cls: Type[BaseModel]) -> str:
+    schema_dict = model_cls.model_json_schema()
+    for field_name, field in model_cls.__annotations__.items():
+        if not _is_supported_type(field, in_container=False):
+            raise UnsupportedModelError(
+                f"Field '{field_name}' has unsupported type '{field}'. "
+                "Supported types: str, int, float, bool, list, dict, Optional, Any, and nested models."
+            )
     return json.dumps(schema_dict)
 
-
-def deserde_model(schema_json: str) -> type[BaseModel]:
-    """
-    Deserialize a JSON schema (as a string) back into a Pydantic model class.
-    This function attempts a simple mapping from JSON schema types to Python types.
-    """
+def deserde_model(schema_json: str) -> Type[BaseModel]:
     schema_dict = json.loads(schema_json)
     properties = schema_dict.get("properties", {})
-    required_fields = schema_dict.get("required", [])
+    required_fields = set(schema_dict.get("required", []))
     model_name = schema_dict.get("title", "DynamicModel")
 
-    # Simple type map; extend as needed
-    type_map: Dict[str, Any] = {
+    type_map = {
         "string": str,
         "integer": int,
         "number": float,
         "boolean": bool,
-        # Add more mappings or logic here if needed.
+        "array": list,
+        "object": dict,
+        "null": type(None)  # Add null handling
     }
+
+    def resolve_ref(field_schema: dict[str, Any]) -> dict[str, Any]:
+        ref = field_schema.get("$ref")
+        if ref:
+            ref_name = ref.split('/')[-1]
+            ref_schema = schema_dict.get("$defs", {}).get(ref_name)
+            if ref_schema is None:
+                raise ValueError(f"Reference {ref} not found in schema.")
+            return ref_schema
+        return field_schema
+
+    def parse_union(schemas: list[dict[str, Any]]) -> Any:
+        union_types = []
+        for s in schemas:
+            s = resolve_ref(s)
+            union_types.append(parse_field(s))
+        return Union[tuple(union_types)]
+
+    def parse_field(field_schema: dict[str, Any]) -> Any:
+        field_schema = resolve_ref(field_schema)
+
+        # Handle unions (anyOf, oneOf)
+        if "anyOf" in field_schema:
+            return parse_union(field_schema["anyOf"])
+        if "oneOf" in field_schema:
+            return parse_union(field_schema["oneOf"])
+
+        field_type = field_schema.get("type")
+
+        # Default to string if no type given and no anyOf/oneOf
+        if not field_type:
+            field_type = "string"
+
+        if field_type == "array":
+            items = field_schema.get("items", {})
+            item_type = parse_field(items)
+            return list[item_type]
+
+        elif field_type == "object":
+            if "properties" in field_schema:
+                nested_schema_json = json.dumps(field_schema)
+                return deserde_model(nested_schema_json)
+            elif "additionalProperties" in field_schema:
+                value_schema = field_schema["additionalProperties"]
+                value_type = parse_field(value_schema)
+                return dict[str, value_type]
+            else:
+                return dict[str, Any]
+
+        elif field_type not in type_map:
+            raise UnsupportedModelError(
+                f"Unsupported field type '{field_type}' in schema. "
+                f"Supported types: {', '.join(type_map.keys())}, optional, and nested models."
+            )
+        else:
+            return type_map[field_type]
 
     fields = {}
     for field_name, field_info in properties.items():
-        json_type = field_info.get("type", "string")
-        field_type = type_map.get(json_type, Any)
-        # If field is required, default = Ellipsis (no default)
-        # If field is optional, default = None
-        default = None if field_name not in required_fields else ...
-        fields[field_name] = (field_type, default)
+        py_type = parse_field(field_info)
+        if field_name in required_fields:
+            fields[field_name] = (py_type, ...)
+        else:
+            default = field_info.get("default", None)
+            fields[field_name] = (Optional[py_type], default)
 
-    DynamicModel = create_model(model_name, **fields)  # type: ignore
+    DynamicModel = create_model(
+        model_name,
+        **fields,
+        model_config={"extra": "forbid"}
+    )
+
+    # Convert ValidationError to ValueError
+    original_init = DynamicModel.__init__
+    def new_init(self, *args, **kwargs):
+        try:
+            original_init(self, *args, **kwargs)
+        except ValidationError as e:
+            raise ValueError(str(e)) from e
+    DynamicModel.__init__ = new_init
+
     return DynamicModel
+
+def _is_supported_type(field_type: Any, in_container: bool = False) -> bool:
+    if field_type in (str, int, float, bool, type(None), Any):
+        return True
+
+    origin = get_origin(field_type)
+    if origin is Union:
+        args = get_args(field_type)
+        # Optional type
+        if len(args) == 2 and any(a is type(None) for a in args):
+            other_arg = args[0] if args[1] is type(None) else args[1]
+            return _is_supported_type(other_arg, in_container=in_container)
+        else:
+            # Non-optional union
+            if in_container:
+                return all(_is_supported_type(a, in_container=True) for a in args)
+            else:
+                return False
+
+    if origin is list:
+        element_type = get_args(field_type)[0]
+        return _is_supported_type(element_type, in_container=True)
+
+    if origin is dict:
+        key_type, value_type = get_args(field_type)
+        if key_type is not str:
+            return False
+        return _is_supported_type(value_type, in_container=True)
+
+    if isinstance(field_type, type) and issubclass(field_type, BaseModel):
+        return True
+
+    return False
 
 
 import pytest
+from typing import Dict, List, Optional, Union, Tuple
 from pydantic import BaseModel
-from serde import serde_model, deserde_model
+import json
+from serde import serde_model, deserde_model, UnsupportedModelError
 
 
-class OriginalModel(BaseModel):
+# Test Models
+class NestedModel(BaseModel):
+    key: str
+    value: int
+
+
+class ComplexModel(BaseModel):
     name: str
     age: int
     is_active: bool = True
+    tags: Optional[List[str]] = None
+    metadata: Optional[Dict[str, Union[int, str]]] = None
+    nested: Optional[NestedModel] = None
 
 
-def test_serde_round_trip():
-    # Serialize the OriginalModel schema
-    schema_json = serde_model(OriginalModel)
-    assert isinstance(schema_json, str), "Serialization should return a JSON string"
+class DictOnlyModel(BaseModel):
+    simple_dict: Dict[str, int]
+    generic_dict: Dict[str, Any] = {"default_key": "default_value"}
 
-    # Deserialize back into a dynamic model
+
+class ListModel(BaseModel):
+    string_list: List[str]
+    nested_list: List[NestedModel]
+
+class UnsupportedUnionModel(BaseModel):
+    mixed: Union[int, str]  # Union types beyond Optional are unsupported
+
+
+class UnsupportedTupleModel(BaseModel):
+    coordinates: Tuple[int, int]  # Tuple types are unsupported
+
+
+# Tests
+def test_complex_model_serialization():
+    # Serialize and deserialize a complex model
+    schema_json = serde_model(ComplexModel)
     DynamicModel = deserde_model(schema_json)
-    assert issubclass(DynamicModel, BaseModel), "Deserialization should return a Pydantic model class"
 
-    # Check that fields match
-    dynamic_model_instance = DynamicModel(name="Alice", age=30, is_active=False)
-    assert dynamic_model_instance.name == "Alice"
-    assert dynamic_model_instance.age == 30
-    assert dynamic_model_instance.is_active is False
+    # Test instance creation
+    instance = DynamicModel(
+        name="Test User",
+        age=25,
+        is_active=False,
+        tags=["tag1", "tag2"],
+        metadata={"key1": 42, "key2": "value2"},
+        nested={"key": "nested_key", "value": 100},
+    )
+    assert instance.name == "Test User"
+    assert instance.age == 25
+    assert instance.is_active is False
+    assert instance.tags == ["tag1", "tag2"]
+    assert instance.metadata == {"key1": 42, "key2": "value2"}
+    assert instance.nested.key == "nested_key"
+    assert instance.nested.value == 100
 
-    # The dynamic model should also reject incorrect types
+    # Test with missing optional fields
+    instance = DynamicModel(name="No Tags", age=30)
+    assert instance.tags is None
+    assert instance.metadata is None
+    assert instance.nested is None
+
+
+def test_dict_model_serialization():
+    # Serialize and deserialize a model with dictionary fields
+    schema_json = serde_model(DictOnlyModel)
+    DynamicModel = deserde_model(schema_json)
+
+    # Test instance creation
+    instance = DynamicModel(
+        simple_dict={"key1": 10, "key2": 20},
+        generic_dict={"custom_key": "custom_value"},
+    )
+    assert instance.simple_dict == {"key1": 10, "key2": 20}
+    assert instance.generic_dict == {"custom_key": "custom_value"}
+
+    # Test with default value for generic_dict
+    instance = DynamicModel(simple_dict={"key3": 30})
+    assert instance.generic_dict == {"default_key": "default_value"}
+
+
+def test_list_model_serialization():
+    # Serialize and deserialize a model with list fields
+    schema_json = serde_model(ListModel)
+    DynamicModel = deserde_model(schema_json)
+
+    # Test instance creation
+    instance = DynamicModel(
+        string_list=["item1", "item2"],
+        nested_list=[{"key": "nested1", "value": 1}, {"key": "nested2", "value": 2}],
+    )
+    assert instance.string_list == ["item1", "item2"]
+    assert len(instance.nested_list) == 2
+    assert instance.nested_list[0].key == "nested1"
+    assert instance.nested_list[0].value == 1
+
+
+def test_unsupported_union_model_serialization():
+    # Test unsupported Union fields
+    with pytest.raises(UnsupportedModelError):
+        serde_model(UnsupportedUnionModel)
+
+
+
+def test_unsupported_tuple_model_serialization():
+    # Test unsupported Tuple fields
+    with pytest.raises(UnsupportedModelError):
+        serde_model(UnsupportedTupleModel)
+
+
+
+def test_validation_errors():
+    # Serialize and deserialize a complex model
+    schema_json = serde_model(ComplexModel)
+    DynamicModel = deserde_model(schema_json)
+
+    # Test invalid data
     with pytest.raises(ValueError):
-        DynamicModel(name="Bob", age="not an integer")
+        DynamicModel(name="Invalid User", age="not an int")
+
+    with pytest.raises(ValueError):
+        DynamicModel(
+            name="Invalid Metadata",
+            age=40,
+            metadata="not a dict",
+        )
+
+    with pytest.raises(ValueError):
+        DynamicModel(
+            name="Invalid Nested",
+            age=40,
+            nested={"key": 123, "value": "not an int"},
+        )
+
+
 
 def test_missing_required_fields():
-    # Serialize the OriginalModel schema
-    schema_json = serde_model(OriginalModel)
+    # Serialize and deserialize a model
+    schema_json = serde_model(ComplexModel)
     DynamicModel = deserde_model(schema_json)
 
-    # 'name' and 'age' are required fields, check if omission fails
+    # Test missing required fields
     with pytest.raises(ValueError):
         DynamicModel()
+
+
+
+def test_extra_fields_rejected():
+    # Serialize and deserialize a model
+    schema_json = serde_model(ComplexModel)
+    DynamicModel = deserde_model(schema_json)
+
+    # Test extra fields
+    with pytest.raises(ValueError):
+        DynamicModel(name="Extra Fields", age=30, extra_field="not allowed")
+
+
+def test_empty_list_and_dict_handling():
+    # Serialize and deserialize models
+    schema_json = serde_model(DictOnlyModel)
+    DynamicModel = deserde_model(schema_json)
+
+    # Test empty lists and dicts
+    instance = DynamicModel(simple_dict={}, generic_dict={})
+    assert instance.simple_dict == {}
+    assert instance.generic_dict == {}
+
+    schema_json = serde_model(ListModel)
+    DynamicModel = deserde_model(schema_json)
+
+    instance = DynamicModel(string_list=[], nested_list=[])
+    assert instance.string_list == []
+    assert instance.nested_list == []
+
+
+def test_field_defaults():
+    # Serialize and deserialize a model with defaults
+    schema_json = serde_model(ComplexModel)
+    DynamicModel = deserde_model(schema_json)
+
+    # Test default values
+    instance = DynamicModel(name="Default Test", age=20)
+    assert instance.is_active is True
+    assert instance.tags is None
+
